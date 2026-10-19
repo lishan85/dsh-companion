@@ -104,6 +104,11 @@ any change, create a dedicated git worktree under the `.git` directory (e.g.
 there; apply results back via branch/merge or patch instead of editing the
 main checkout in place.
 
+Before committing, tagging, or pushing, verify `git var GIT_AUTHOR_IDENT` and
+`git var GIT_COMMITTER_IDENT` use the personal GitHub identity for this repo.
+Set a repository-local identity instead of inheriting a workstation identity.
+Do not commit machine usernames, private home paths, or employer information.
+
 Use Conventional Commits. CI tests Node 22 and 24 and validates packed-file
 contents. Publishing is manual/tag-gated through npm Trusted Publishing. Do not
 commit npm tokens, local databases, build output, caches, or files under

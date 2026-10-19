@@ -17,12 +17,16 @@
 // Usage: node probe/boot-probe.mjs [db-path]   (default probe/tmp/ltm.db)
 
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-const DSH = "/Users/user/.local/share/fnm/node-versions/v24.20.0/installation/lib/node_modules/@deepseek-ai/dsh/node_modules";
+const DSH = process.env.DSH_NODE_MODULES ?? path.join(
+  execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim(),
+  "@deepseek-ai/dsh/node_modules",
+);
 const { boot } = await import(`${DSH}/@deepseek-ai/dsh-app-boot/lib/index.js`);
 const { provideCmdline } = await import(`${DSH}/@deepseek-ai/dsh-cmdline/lib/index.js`);
 const { createLaunchEnvironmentSnapshot } = await import(`${DSH}/@deepseek-ai/dsh-launch-environment/lib/index.js`);
