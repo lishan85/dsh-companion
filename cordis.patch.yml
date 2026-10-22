@@ -24,3 +24,5 @@
         proactiveQuietStart: '23:00'
         proactiveQuietEnd: '08:00'
         proactiveFollowUpHour: 9
+        diaryEnabled: true
+        diaryTimeZone: Asia/Shanghai

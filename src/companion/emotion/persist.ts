@@ -207,10 +207,17 @@ export function finishOutbox(db: DatabaseSync, id: number, now: number): void {
   }
 }
 
-export function requeueDelivering(db: DatabaseSync): void {
-  db.prepare(
-    "UPDATE proactive_outbox SET status = 'queued', delivered_at = NULL WHERE status = 'delivering'",
-  ).run();
+/**
+ * A process that died while a row was `delivering` may already have handed
+ * the message to `followup`. Putting it back to `queued` would send it again.
+ * Finishing it is at-most-once: the row is not claimed a second time. If the
+ * crash happened before the send, that one message is not retried.
+ */
+export function settleDelivering(db: DatabaseSync, now: number): void {
+  const rows = db.prepare(
+    "SELECT id FROM proactive_outbox WHERE status = 'delivering' ORDER BY id",
+  ).all() as unknown as Array<{ id: number }>;
+  for (const row of rows) finishOutbox(db, Number(row.id), now);
 }
 
 export function relinkEmotionRows(db: DatabaseSync, from: string, to: string): void {

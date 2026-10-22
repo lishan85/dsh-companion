@@ -62,7 +62,9 @@ export function planProactive(input: PlanInput): ProactivePlan {
   const enqueue: PlannedSend[] = [];
   const arm: string[] = [];
   const pendingThresholds = new Set(
-    input.outbox.filter((item) => item.status === "queued" && item.kind === "threshold").map((item) => item.dimension),
+    input.outbox.filter((item) => (
+      (item.status === "queued" || item.status === "delivering") && item.kind === "threshold"
+    )).map((item) => item.dimension),
   );
   const queuedFollowups = new Set(
     input.outbox.filter((item) => item.kind === "followup" && item.followupId !== null && item.status !== "delivered")

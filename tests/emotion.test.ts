@@ -12,6 +12,7 @@ import { DEFAULT_DYNAMICS, applyEmotionDeltas, baselineVector, projectEmotion, r
 import { defaultEmotionRuntime, PersistedEmotionModel } from "../src/companion/emotion/engine.js";
 import { renderInnerMonologue } from "../src/companion/emotion/express.js";
 import { CheapModelScorer, completionsUrl, parseScore, type EmotionScorer } from "../src/companion/emotion/model-scorer.js";
+import { planProactive } from "../src/companion/emotion/proactive.js";
 import { scoreUtterance } from "../src/companion/emotion/rules.js";
 import { zeroDeltas, type EmotionVector, type ProactiveRow, type ProactiveSettings } from "../src/companion/emotion/types.js";
 import { apply } from "../src/companion/plugin.js";
@@ -236,6 +237,9 @@ describe("persisted emotion", () => {
     created.close();
     const editor = new DatabaseSync(path);
     editor.exec(`
+      DROP TABLE IF EXISTS diary_fts;
+      DROP TABLE IF EXISTS diary_event;
+      DROP TABLE IF EXISTS diary_entry;
       DROP TABLE IF EXISTS proactive_outbox;
       DROP TABLE IF EXISTS emotion_followup;
       DROP TABLE IF EXISTS emotion_latch;
@@ -246,7 +250,7 @@ describe("persisted emotion", () => {
     editor.close();
     const upgraded = new CompanionStore(path);
     try {
-      expect(upgraded.schemaVersion()).toBe(2);
+      expect(upgraded.schemaVersion()).toBe(SCHEMA_VERSION);
       expect(upgraded.getTurn(saved.id)?.content).toBe("不要弄丢这句话");
       expect(upgraded.getEmotion("primary")).toBeUndefined();
       expect(upgraded.emotionHistory("primary", 10)).toEqual([]);
@@ -551,7 +555,7 @@ describe("proactive queue", () => {
     }
   });
 
-  it("requeues a delivery that was claimed and then interrupted", () => {
+  it("finishes a delivering row on reopen so a crash cannot send it twice", async () => {
     const path = fileDb();
     const store = new CompanionStore(path);
     store.commitEmotion({
@@ -574,13 +578,52 @@ describe("proactive queue", () => {
       markFollowupsQueued: [],
     });
     expect(store.claimProactive(1, AWAKE)).toBe(true);
+    expect(store.proactiveQueue("primary")[0]?.status).toBe("delivering");
     store.close();
     const again = new CompanionStore(path);
     try {
-      expect(again.proactiveQueue("primary")[0]?.status).toBe("queued");
+      expect(again.proactiveQueue("primary")[0]?.status).toBe("delivered");
+      let calls = 0;
+      const mood = model(again, {
+        deliver: () => {
+          calls += 1;
+          return true;
+        },
+      });
+      await mood.evaluateProactive(AWAKE);
+      expect(calls).toBe(0);
+      expect(again.proactiveQueue("primary")).toHaveLength(1);
+      expect(again.emotionLatches("primary").get("missing")).toBe(false);
     } finally {
       again.close();
     }
+  });
+
+  it("does not queue a second threshold while one row is still delivering", () => {
+    const delivering: ProactiveRow = {
+      id: 1,
+      personId: "primary",
+      sessionId: "s",
+      createdAt: AWAKE,
+      dueAt: AWAKE,
+      kind: "threshold",
+      dimension: "missing",
+      followupId: null,
+      text: "你想开口。",
+      status: "delivering",
+      deliveredAt: null,
+    };
+    const plan = planProactive({
+      now: AWAKE,
+      personId: "primary",
+      sessionId: "s",
+      vector: vector({ missing: 0.9 }),
+      latches: new Map([["missing", true]]),
+      followups: [],
+      outbox: [delivering],
+      settings: settings(),
+    });
+    expect(plan.enqueue.filter((item) => item.dimension === "missing")).toEqual([]);
   });
 
   it("leaves the row queued when nothing can deliver it", async () => {

@@ -86,7 +86,11 @@ describe("companion store", () => {
     const store = new CompanionStore(":memory:");
     try {
       expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
-      expect(MIGRATIONS.map((step) => step.name)).toEqual(["core-turns-identity-fts", "emotion-state-history"]);
+      expect(MIGRATIONS.map((step) => step.name)).toEqual([
+        "core-turns-identity-fts",
+        "emotion-state-history",
+        "diary-layers",
+      ]);
       const saved = store.appendTurn({
         channel: "qq",
         userId: "u1",
@@ -201,7 +205,7 @@ describe("companion store", () => {
     newerDb.exec("PRAGMA journal_mode = DELETE");
     newerDb.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     newerDb.prepare("INSERT INTO meta (key, value) VALUES ('product', 'dsh-companion')").run();
-    newerDb.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '3')").run();
+    newerDb.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '4')").run();
     newerDb.close();
     const newerBytes = readFileSync(newer);
     expect(() => new CompanionStore(newer)).toThrow(new RegExp(`newer than supported ${SCHEMA_VERSION}`));
