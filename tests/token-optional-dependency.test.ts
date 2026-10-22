@@ -6,7 +6,7 @@ const resolveBackend = vi.hoisted(() => vi.fn(() => {
 }));
 vi.mock("node:module", () => ({ createRequire: () => resolveBackend }));
 
-import { apply } from "../src/index.js";
+import { apply } from "../src/memory-plugin.js";
 
 it("never resolves the optional backend by default, but configured mode fails loudly if omitted", () => {
   let dispose = () => {};

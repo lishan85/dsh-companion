@@ -51,9 +51,9 @@ jobs:
         run: |
           pnpm pack --pack-destination .
           shopt -s nullglob
-          tarballs=(*dsh-ltm-*.tgz)
+          tarballs=(*dsh-companion-*.tgz)
           if [ "${#tarballs[@]}" -ne 1 ]; then
-            printf 'expected exactly one dsh-ltm tarball, got %s\n' "${#tarballs[@]}" >&2
+            printf 'expected exactly one dsh-companion tarball, got %s\n' "${#tarballs[@]}" >&2
             exit 1
           fi
           tar tzf "${tarballs[0]}" > packed.txt
@@ -63,4 +63,4 @@ jobs:
           node .github/scripts/check-packed.mjs packed.txt
       - name: Clean up pack artifacts
         if: always()
-        run: rm -f *dsh-ltm-*.tgz packed.txt
+        run: rm -f *dsh-companion-*.tgz packed.txt

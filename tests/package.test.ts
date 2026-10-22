@@ -11,6 +11,6 @@ describe("installable DSH bundle", () => {
     const patch = readFileSync(new URL(manifest.dsh.bundle.patch, root), "utf8");
     expect(patch).toContain("- insert:");
     expect(patch).toContain(`name: '${manifest.name}'`);
-    expect(patch).toContain("dshHomePath('memory/ltm.db')");
+    expect(patch).toContain("dshHomePath('companion/companion.db')");
   });
 });

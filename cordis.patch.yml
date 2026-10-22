@@ -1,28 +1,19 @@
-# The dsh-ltm bundle patch: one row inserted over whatever layers came before
-# it. A patch replaces the targeted row's whole `config`, so a profile
-# overriding this row must restate every key it wants to keep.
+# dsh-companion 的 bundle patch。`path` 没有代码内默认值：原始对话不能
+# 落在进程碰巧启动的目录里。部署路径写在这一行，经 `dshHomePath` 解析，
+# 所以同一台机器上的各个 profile 共用一份陪伴记录。
 #
-# `path` has no code-side default on purpose — a durable store of user facts
-# must not land in whatever directory the harness happened to start in. The
-# deployment value lives here, beside the row, resolved through the loader's
-# `dshHomePath` so every profile on this machine shares one memory file.
-# This is a NEW database, independent of the legacy dsh-memory
-# `memory/memory.db`; populate it with `dsh-ltm migrate` and leave the old
-# file untouched as the rollback copy.
+# 这是一份新库，和上游 dsh-ltm 的 `memory/ltm.db` 无关。`dsh-ltm` 命令仍只
+# 管理那份事实记忆库，不会读写这份原始对话。
 
 - insert:
-    - id: ltm
-      name: '@tr1v3r/dsh-ltm'
+    - id: companion
+      name: 'dsh-companion'
       config:
-        path: !!js dshHomePath('memory/ltm.db')
-        defaultScope: ''
-        autoProjectScope: true
-        promptRecentCount: 10
-        promptMaxChars: 2000
-        maxTextChars: 2000
-        searchLimitDefault: 10
-        searchLimitMax: 50
-        promptOrder: 50
-        dedupeThreshold: 0.8
-        dedupeCosineThreshold: 0.92
-        staleAfterDays: 90
+        path: !!js dshHomePath('companion/companion.db')
+        recentTurns: 12
+        contextRadius: 2
+        snippetLimit: 3
+        promptMaxChars: 6000
+        promptOrder: 12
+        defaultPersonId: primary
+        searchLimitMax: 20
