@@ -23,12 +23,28 @@ import {
   listOutbox,
   readEmotion,
   relinkEmotionRows,
-  requeueDelivering,
   requeueOutbox,
+  settleDelivering,
   type EmotionCommit,
   type ProactiveWrite,
 } from "./emotion/persist.js";
 import type { EmotionHistoryRow, EmotionStateRow, FollowupRow, ProactiveRow } from "./emotion/types.js";
+import {
+  claimDiary as claimDiaryRow,
+  diaryFts,
+  insertDiaryEvent as insertDiaryEventRow,
+  listDiaryEntries,
+  listDiaryEvents,
+  readDiaryEntry,
+  readDiaryEntryById,
+  relinkDiaryRows,
+  releaseDiary as releaseDiaryRow,
+  sealDiary as sealDiaryRow,
+  type DiaryClaimInput,
+  type DiaryEventInput,
+  type DiarySealInput,
+} from "./diary/persist.js";
+import type { DiaryClaim, DiaryEntry, DiaryEvent, DiaryLayer } from "./diary/types.js";
 import { FTS_TOKEN_VERSION, SCHEMA_VERSION, classifySchema, migrateSchema } from "./schema.js";
 import type { IdentityRecord, TurnInput, TurnRecord, TurnRole } from "./types.js";
 
@@ -92,7 +108,7 @@ export class CompanionStore {
         if (found.kind === "empty") migrateSchema(this.#db, 0);
         else if (found.kind === "legacy") migrateSchema(this.#db, found.from);
         this.#rebuildFtsIfNeeded();
-        requeueDelivering(this.#db);
+        settleDelivering(this.#db, this.#now());
       });
     } catch (error) {
       try {
@@ -226,6 +242,7 @@ export class CompanionStore {
       if (existing && existing.person_id !== target) {
         this.#db.prepare("UPDATE turns SET person_id = ? WHERE person_id = ?").run(target, existing.person_id);
         relinkEmotionRows(this.#db, existing.person_id, target);
+        relinkDiaryRows(this.#db, existing.person_id, target);
       }
     });
   }
@@ -303,6 +320,79 @@ export class CompanionStore {
     this.#transaction(() => finishOutbox(this.#db, id, now));
   }
 
+  turnPeople(): string[] {
+    this.#alive();
+    const rows = this.#db.prepare(
+      "SELECT DISTINCT person_id FROM turns ORDER BY person_id",
+    ).all() as unknown as Array<{ person_id: string }>;
+    return rows.map((row) => row.person_id);
+  }
+
+  turnStamps(personId: string): number[] {
+    this.#alive();
+    const rows = this.#db.prepare(
+      "SELECT ts FROM turns WHERE person_id = ? ORDER BY ts, id",
+    ).all(personId) as unknown as Array<{ ts: number }>;
+    return rows.map((row) => Number(row.ts));
+  }
+
+  turnsBetween(personId: string, start: number, end: number): TurnRecord[] {
+    this.#alive();
+    const rows = this.#db.prepare(
+      "SELECT * FROM turns WHERE person_id = ? AND ts >= ? AND ts < ? ORDER BY id",
+    ).all(personId, start, end) as unknown as Row[];
+    return rows.map(toTurn);
+  }
+
+  diaryEntries(personId?: string): DiaryEntry[] {
+    this.#alive();
+    return listDiaryEntries(this.#db, personId);
+  }
+
+  diaryEntry(personId: string, layer: DiaryLayer, periodKey: string): DiaryEntry | undefined {
+    this.#alive();
+    return readDiaryEntry(this.#db, personId, layer, periodKey);
+  }
+
+  diaryEntryById(id: number): DiaryEntry | undefined {
+    this.#alive();
+    return readDiaryEntryById(this.#db, id);
+  }
+
+  diaryEvents(personId: string): DiaryEvent[] {
+    this.#alive();
+    return listDiaryEvents(this.#db, personId);
+  }
+
+  claimDiary(input: DiaryClaimInput): DiaryClaim {
+    this.#alive();
+    return this.#transaction(() => claimDiaryRow(this.#db, input));
+  }
+
+  sealDiary(input: DiarySealInput): boolean {
+    this.#alive();
+    return this.#transaction(() => sealDiaryRow(this.#db, input));
+  }
+
+  releaseDiary(personId: string, layer: DiaryLayer, periodKey: string): void {
+    this.#alive();
+    this.#transaction(() => releaseDiaryRow(this.#db, personId, layer, periodKey));
+  }
+
+  insertDiaryEvent(input: DiaryEventInput): boolean {
+    this.#alive();
+    return this.#transaction(() => insertDiaryEventRow(this.#db, input));
+  }
+
+  ftsDiary(match: string, personId: string | undefined, limit: number): Array<{ id: number; rank: number }> {
+    this.#alive();
+    try {
+      return diaryFts(this.#db, match, personId, limit);
+    } catch (error) {
+      throw new CompanionError("search", "dsh-companion: diary full-text query failed", { cause: error });
+    }
+  }
+
   latestTurnForSession(sessionId: string): TurnRecord | undefined {
     this.#alive();
     const row = this.#db.prepare(
@@ -323,6 +413,12 @@ export class CompanionStore {
     const turns = this.#db.prepare("SELECT id, content FROM turns ORDER BY id").all() as unknown as Array<{ id: number; content: string }>;
     const insert = this.#db.prepare("INSERT INTO turns_fts (rowid, content) VALUES (?, ?)");
     for (const turn of turns) insert.run(turn.id, joinTokens(tokenize(turn.content)));
+    this.#db.exec("DELETE FROM diary_fts");
+    const pages = this.#db.prepare(
+      "SELECT id, text FROM diary_entry WHERE status = 'sealed' ORDER BY id",
+    ).all() as unknown as Array<{ id: number; text: string }>;
+    const insertDiary = this.#db.prepare("INSERT INTO diary_fts (rowid, content) VALUES (?, ?)");
+    for (const page of pages) insertDiary.run(page.id, joinTokens(tokenize(page.text)));
     this.#db.prepare(
       `INSERT INTO meta (key, value) VALUES ('fts_token_version', ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,

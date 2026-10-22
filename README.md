@@ -6,13 +6,14 @@
 
 - 原始发言进 SQLite，不提炼成事实卡片。
 - FTS5 中文检索（拉丁词加 CJK 单字和二字词）。
-- 固定预算内，用第一人称注入最近的原话和检索到的上下文。
-- `history_search`。
+- 固定预算内，用第一人称注入最近的原话、检索到的上下文，以及她写过的日记。
+- `history_search`。原话和已封日记一起查。
 - 平台账号到同一个人的身份表。
 - 多维情绪：PAD 加一组可以并存的离散心情，以及更慢的亲密度。注入的是一两句内心独白，不是数字。
-- 主动开口：阈值、每日上限、最小间隔、安静时段，以及第二天跟进记得的事。
+- 主动开口：阈值、每日上限、最小间隔、安静时段，以及第二天跟进记得的事。停在送出中的一行不会再发第二次。
+- 她口吻的日、周、月日记。原文不删，重要事件不压缩。
 
-分层日记、向量检索和重排仍是接口，默认什么都不做。约定写在 [docs/PRD.md](docs/PRD.md)。日记和向量的空实现在 `src/companion/stubs.ts`。
+向量检索和重排仍是接口，默认不建向量。约定写在 [docs/PRD.md](docs/PRD.md)。空实现在 `src/companion/stubs.ts`。
 
 ## 和 dsh-ltm 的关系
 
@@ -30,7 +31,7 @@
 
 ## 安装
 
-需要 Node `^22.19.0 || >=24.0.0`。默认路径不需要 API key。便宜模型打分是可选的，没有 key 就用规则打分，启动不会去等凭据。
+需要 Node `^22.19.0 || >=24.0.0`。默认路径不需要 API key。心情和日记的便宜模型都是可选的，没有 key 就用规则或确定性正文，启动不会去等凭据。
 
 包名是 `dsh-companion`。发布到 npm 之前，在 profile 目录里把本仓库当作本地依赖安装：
 
@@ -55,7 +56,7 @@ node probe/boot-probe.mjs
 
 ## 配置
 
-`path` 必填，没有代码内默认值。其余字段有默认值。未知字段被忽略。嵌入地址仍然不在这份配置里。便宜模型的地址只有在 `emotionModelEnabled` 打开时才读取；key 不进配置文件。
+`path` 必填，没有代码内默认值。其余字段有默认值。未知字段被忽略。嵌入地址仍然不在这份配置里。便宜模型的地址只有在对应开关打开时才读取；key 不进配置文件。
 
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |
@@ -81,8 +82,14 @@ node probe/boot-probe.mjs
 | `emotionModelEnabled` | `false` | 打开后才尝试便宜模型。必须同时给 `emotionModelBaseUrl` |
 | `emotionModelName` | `deepseek-chat` | 便宜模型的模型名 |
 | `emotionModelTimeoutMs` | `800` | 超时或失败就改用规则打分，不卡住回合 |
+| `diaryEnabled` | `true` | 关掉之后不写日记、不标重要事件 |
+| `diaryTimeZone` | `Asia/Shanghai` | 日、周、月的本地日历 |
+| `diaryIntervalMs` | `900000`（15 分钟） | 没有新回合时也检查要不要封页。`0` 表示没有定时器，换日和空闲仍会封 |
+| `diaryModelEnabled` | `false` | 打开后才尝试用便宜模型写日记。必须同时给 `diaryModelBaseUrl` |
+| `diaryModelName` | `deepseek-chat` | 写日记用的模型名 |
+| `diaryModelTimeoutMs` | `4000` | 超时或失败就改用确定性正文。封页不在回合的热路径上 |
 
-`promptTokenizerPath` 沿用 dsh-ltm 的可选分词器资产，需要安装 optional 依赖 `@huggingface/tokenizers@0.2.0`。
+`promptTokenizerPath` 沿用 dsh-ltm 的可选分词器资产，需要安装 optional 依赖 `@huggingface/tokenizers@0.2.0`。日记的 key 是环境变量 `DSH_COMPANION_DIARY_API_KEY`，和心情的 key 分开。没有 key、超时或正文不合规格，就用确定性的第一人称正文。
 
 ## 架构
 
@@ -90,7 +97,7 @@ node probe/boot-probe.mjs
 
 `session/event` 记录 `user/message` 和 `assistant/message`。`turn/end` 没有正文。助手消息沿用本会话上一条的渠道字段。
 
-模式版本 2。版本 1 的库在打开时按 `MIGRATIONS` 升到 2，原文保留。更新、外来或不完整的文件在只读阶段拒绝，不改主库。
+模式版本 3。版本 1 和 2 的库在打开时按 `MIGRATIONS` 升到 3，原文保留。更新、外来或不完整的文件在只读阶段拒绝，不改主库。
 
 ## 情绪和主动开口
 
@@ -98,14 +105,19 @@ node probe/boot-probe.mjs
 
 注入只取最强的两三维，写成一句第一人称内心独白，放在易变的那条回忆里。人设那段不动，所以系统前缀还能复用。心情落在同一档里时，这句话保持不变。
 
-主动消息进 `proactive_outbox`。超过阈值，或第二天到了该跟进的事（考试、面试、身体、出行、生日、约定），才排队。安静时段、每日上限和最小间隔都会把 `due_at` 推后。送出时，如果这个会话还有活着的 agent，就调用它的 `followup`：正文是让她自己开口的一句指令，`source.kind` 为 `dsh-companion`，开头有 U+2060，因此不会被记成用户说的话。没有活着的 agent 时，行留在 `queued`。宿主可以之后调用 `drainProactiveQueue(store, now, deliver)`。`deliverViaFollowup(agent, text)` 是跟 harness 对齐的那一种 deliver。进程如果在送出中途停掉，下次打开会把 `delivering` 改回 `queued`，所以有可能重发一次。
+主动消息进 `proactive_outbox`。超过阈值，或第二天到了该跟进的事（考试、面试、身体、出行、生日、约定），才排队。安静时段、每日上限和最小间隔都会把 `due_at` 推后。送出时，如果这个会话还有活着的 agent，就调用它的 `followup`：正文是让她自己开口的一句指令，`source.kind` 为 `dsh-companion`，开头有 U+2060，因此不会被记成用户说的话。没有活着的 agent 时，行留在 `queued`。宿主可以之后调用 `drainProactiveQueue(store, now, deliver)`。`deliverViaFollowup(agent, text)` 是跟 harness 对齐的那一种 deliver。`deliver` 明确说没送成（返回假或抛错）时，行回到 `queued`，可以再试。进程如果停在 `delivering`，下次打开把这一行收成 `delivered`，不再送。这是至多一次：崩溃若发生在真正调用 `followup` 之前，这一条就不会补发。
 
-## 日记和向量
+## 日记
 
-这两块现在没有行为：
+她按本地日写一页第一人称日记，再收成周和月。原始回合一直留着。考试、约定、承诺、点名这类重要事件整句保存，周页和月页可以把普通日子写短，但这些原话会附在页尾，注入时也不会被缩掉。
 
-- `DiaryWriter` 不写日、周、月。
-- `VectorIndex` 不建向量。默认重排保持 FTS5 的顺序，向量命中会排在全文命中之后。
+封页发生在换日（包括重启后的下一句）、agent 空闲，或定时器。同一个人的同一天、同一周、同一个月只写一次。正在过的今天不封。便宜模型用 `DSH_COMPANION_DIARY_API_KEY`；没有 key 就用确定性正文。日记和原话一起进 FTS，命中之后用「我翻到自己写过的……」放进同一条易变回忆，和原话共用字符（以及可选的 token）预算。装不下时先丢掉检索片段，再丢掉最旧的近期原话。人设那段不动。
+
+`StubDiaryWriter` 还在，给测试和显式关掉日记的部署用。插件自己的默认实现会落库。
+
+## 向量
+
+`VectorIndex` 不建向量。默认重排保持 FTS5 的顺序，向量命中会排在全文命中之后。
 
 `StubEmotionModel` 还在，给测试和显式关掉心情的部署用。插件自己的默认实现是会落库的那一个。
 
@@ -120,14 +132,15 @@ QQ、微信和其他社区桥把消息送进 dsh 会话。本插件只在 dsh �
 - 预算装不下的旧回合不会出现在这一轮注入里。它们还在库里，检索也可能漏。
 - 人设要求想不起时含糊，不要编造，也不要宣布「没有这段经历」。模型不一定照做。
 - 身份字段缺失时，不同平台用户可能被记成同一个人。
-- 本仓库没有实机模型回合，也没有拿真实的 DeepSeek key 打过分。便宜模型的请求形状用 mock 测过；它在真的端点上会不会按 JSON 回，没有验证。
-- 主动开口依赖活着的 `agent.followup`。本环境没有跑通一次真实的 harness 投递，也没有把消息送到 QQ 或微信。队列和 `drainProactiveQueue` 是接入点。
+- 本仓库没有实机模型回合，也没有拿真实的 DeepSeek key 打过分。心情和日记的便宜模型请求形状都用 mock 测过；它们在真的端点上会不会按约定回，没有验证。
+- 主动开口依赖活着的 `agent.followup`。本环境没有跑通一次真实的 harness 投递，也没有把消息送到 QQ 或微信。队列和 `drainProactiveQueue` 是接入点。停在 `delivering` 的行不会再送一次。
+- 日记的重要事件是关键词，不是语义理解。已经封好的页不会因为事后又补进一句而改写；那一句仍在原文里，注入时会把缺的原话补上。
 - 渠道桥的钩子字段仍未对照过它们的实现。
 
 ## 路线
 
 1. 情绪、衰减、亲密度，以及带上限和安静时段的主动开口。这一步已经接上。
-2. 她口吻的日、周、月日记。原文永久保留，重要事件不压缩。
+2. 她口吻的日、周、月日记。原文永久保留，重要事件不压缩。这一步已经接上。
 3. 可配置嵌入、离线回退，以及和 FTS5 混在一起的重排。
 4. 更长期的微调。现在没有这条代码路径。
 

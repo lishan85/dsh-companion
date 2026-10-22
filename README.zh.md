@@ -1,6 +1,6 @@
 # dsh-companion
 
-说明的正文在 [README.md](README.md)，是简体中文。这里只补情绪和主动开口这一层，避免和正文各写一套。
+说明的正文在 [README.md](README.md)，是简体中文。这里补情绪、主动开口和日记这几层，避免和正文各写一套。
 
 ## 情绪
 
@@ -18,4 +18,10 @@
 
 超过阈值，或第二天要跟进一件记得的事，就写入 `proactive_outbox`。默认时区 `Asia/Shanghai`，安静时段 23:00–08:00，每天最多 2 条，两条之间至少 6 小时。
 
-送出走活着的 agent 的 `followup`。没有这个方法，或者当前没有活着的会话时，行保持 `queued`。接入点是 `drainProactiveQueue` 和 `deliverViaFollowup`。详见 [docs/PRD.md](docs/PRD.md)。
+送出走活着的 agent 的 `followup`。没有这个方法，或者当前没有活着的会话时，行保持 `queued`。`deliver` 明确失败时可以再试。进程停在 `delivering` 时，下次打开把这一行收成已送，不再发第二次。接入点是 `drainProactiveQueue` 和 `deliverViaFollowup`。详见 [docs/PRD.md](docs/PRD.md)。
+
+## 日记
+
+她用第一人称写日、周、月。原始回合不删。重要事件整句留下，周和月可以把普通日子写短，但这些原话不压缩。换日或空闲时封页，同一页再跑一次不会多写一页。
+
+便宜模型看环境变量 `DSH_COMPANION_DIARY_API_KEY`。没有 key、超时或正文不合规格，就用确定性正文，也不去等凭据。日记和原话一起检索，放进同一条易变回忆，共用原来的预算。稳定人设不写日记。

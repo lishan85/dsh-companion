@@ -1,11 +1,12 @@
 /**
- * Companion schema, version 2.
+ * Companion schema, version 3.
  *
  * Version 1 is the raw transcript, its FTS index, and the identity map.
  * Version 2 adds the emotion vector, its history, follow-ups, and the
- * proactive outbox. Later slices append a step to {@link MIGRATIONS}
- * (diary, vectors). A newer, foreign, or malformed file is refused on a
- * read-only look and is not opened for write.
+ * proactive outbox. Version 3 adds diary pages and verbatim events.
+ * Later slices append a step to {@link MIGRATIONS} (vectors). A newer,
+ * foreign, or malformed file is refused on a read-only look and is not
+ * opened for write.
  *
  * @module dsh-companion/schema
  */
@@ -14,7 +15,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { CompanionError } from "./errors.js";
 
 export const PRODUCT = "dsh-companion";
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 export const FTS_TOKEN_VERSION = 1;
 
 export interface MigrationStep {
@@ -91,6 +92,19 @@ const EMOTION_OBJECTS = [
   "emotion_latch", "proactive_outbox", "proactive_outbox_due",
 ] as const;
 
+const DIARY_ENTRY_COLUMNS = [
+  "id", "person_id", "layer", "period_key", "text", "source", "status", "created_at", "updated_at",
+] as const;
+
+const DIARY_EVENT_COLUMNS = [
+  "id", "person_id", "turn_id", "ts", "period_key", "role", "kind", "verbatim",
+] as const;
+
+const DIARY_OBJECTS = [
+  "diary_entry", "diary_entry_period", "diary_event", "diary_event_person", "diary_event_turn",
+  "diary_fts", "diary_fts_data", "diary_fts_idx", "diary_fts_content", "diary_fts_docsize", "diary_fts_config",
+] as const;
+
 const V2_SQL = `
   CREATE TABLE IF NOT EXISTS emotion_state (
     person_id TEXT PRIMARY KEY,
@@ -164,16 +178,49 @@ const V2_SQL = `
   CREATE INDEX IF NOT EXISTS proactive_outbox_due ON proactive_outbox (person_id, status, due_at);
 `;
 
+const V3_SQL = `
+  CREATE TABLE IF NOT EXISTS diary_entry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id TEXT NOT NULL,
+    layer TEXT NOT NULL,
+    period_key TEXT NOT NULL,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS diary_entry_period ON diary_entry (person_id, layer, period_key);
+  CREATE TABLE IF NOT EXISTS diary_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id TEXT NOT NULL,
+    turn_id INTEGER NOT NULL,
+    ts INTEGER NOT NULL,
+    period_key TEXT NOT NULL,
+    role TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    verbatim TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS diary_event_person ON diary_event (person_id, ts);
+  CREATE UNIQUE INDEX IF NOT EXISTS diary_event_turn ON diary_event (turn_id);
+  CREATE VIRTUAL TABLE IF NOT EXISTS diary_fts USING fts5(
+    content,
+    tokenize = 'unicode61'
+  );
+`;
+
 const ALLOWED = new Set<string>([
   "meta", "turns", "turns_fts", "identities",
   "turns_person_recent", "turns_session", "identities_person",
   "turns_fts_data", "turns_fts_idx", "turns_fts_content", "turns_fts_docsize", "turns_fts_config",
   ...EMOTION_OBJECTS,
+  ...DIARY_OBJECTS,
 ]);
 
 export const MIGRATIONS: readonly MigrationStep[] = [
   { version: 1, name: "core-turns-identity-fts", up: applyCore },
   { version: 2, name: "emotion-state-history", up: applyEmotion },
+  { version: 3, name: "diary-layers", up: applyDiary },
 ];
 
 export type SchemaClassification =
@@ -247,6 +294,10 @@ function applyEmotion(db: DatabaseSync): void {
   db.exec(V2_SQL);
 }
 
+function applyDiary(db: DatabaseSync): void {
+  db.exec(V3_SQL);
+}
+
 function stamp(db: DatabaseSync, version: number): void {
   db.prepare(
     `INSERT INTO meta (key, value) VALUES ('schema_version', ?)
@@ -273,7 +324,7 @@ function coreProblem(db: DatabaseSync): string | undefined {
 }
 
 function schemaProblem(db: DatabaseSync, version: number): string | undefined {
-  return coreProblem(db) ?? emotionProblem(db, version);
+  return coreProblem(db) ?? emotionProblem(db, version) ?? diaryProblem(db, version);
 }
 
 function emotionProblem(db: DatabaseSync, version: number): string | undefined {
@@ -359,6 +410,56 @@ function emotionProblem(db: DatabaseSync, version: number): string | undefined {
     OR (status != 'delivered' AND delivered_at IS NOT NULL)`);
   if (outboxBad > 0) {
     return `dsh-companion: ${outboxBad} malformed proactive_outbox row(s); refusing to read or modify an unknown state`;
+  }
+  return undefined;
+}
+
+function diaryProblem(db: DatabaseSync, version: number): string | undefined {
+  const names = new Set(objectNames(db));
+  const present = DIARY_OBJECTS.filter((name) => names.has(name));
+  if (version < 3) {
+    if (present.length > 0) {
+      return "dsh-companion: diary objects exist before schema 3; refusing to modify an unknown schema";
+    }
+    return undefined;
+  }
+  if (present.length !== DIARY_OBJECTS.length) {
+    return "dsh-companion: diary tables are missing; refusing to modify an unknown schema";
+  }
+  if (!sameColumns(db, "diary_entry", DIARY_ENTRY_COLUMNS)) {
+    return "dsh-companion: diary_entry does not match the expected columns";
+  }
+  if (!sameColumns(db, "diary_event", DIARY_EVENT_COLUMNS)) {
+    return "dsh-companion: diary_event does not match the expected columns";
+  }
+  if (!ftsOk(db, "diary_fts")) return "dsh-companion: diary_fts is not the expected fts5 content index";
+  const entryBad = badCount(db, `SELECT COUNT(*) AS n FROM diary_entry WHERE
+    typeof(person_id) != 'text' OR person_id = ''
+    OR layer NOT IN ('day', 'week', 'month')
+    OR (layer = 'day' AND period_key NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')
+    OR (layer = 'week' AND period_key NOT GLOB '[0-9][0-9][0-9][0-9]-W[0-9][0-9]')
+    OR (layer = 'month' AND period_key NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]')
+    OR typeof(text) != 'text'
+    OR source NOT IN ('pending', 'model', 'fallback')
+    OR status NOT IN ('sealing', 'sealed')
+    OR (status = 'sealing' AND (source != 'pending' OR text != ''))
+    OR (status = 'sealed' AND (source NOT IN ('model', 'fallback') OR text = ''))
+    OR typeof(created_at) != 'integer' OR typeof(updated_at) != 'integer'
+    OR created_at < 0 OR updated_at < 0
+    OR created_at > 9007199254740991 OR updated_at > 9007199254740991`);
+  if (entryBad > 0) {
+    return `dsh-companion: ${entryBad} malformed diary_entry row(s); refusing to read or modify an unknown state`;
+  }
+  const eventBad = badCount(db, `SELECT COUNT(*) AS n FROM diary_event WHERE
+    typeof(person_id) != 'text' OR person_id = ''
+    OR typeof(turn_id) != 'integer' OR turn_id < 1
+    OR typeof(ts) != 'integer' OR ts < 0 OR ts > 9007199254740991
+    OR period_key NOT GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+    OR role NOT IN ('user', 'assistant')
+    OR ${badToken("kind")}
+    OR typeof(verbatim) != 'text' OR verbatim = ''`);
+  if (eventBad > 0) {
+    return `dsh-companion: ${eventBad} malformed diary_event row(s); refusing to read or modify an unknown state`;
   }
   return undefined;
 }

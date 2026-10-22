@@ -2,25 +2,26 @@
 
 她一直是同一个人。上下文被截断、会话被关掉、中间发生过摘要，都不把过去变成一份交给她阅读的交接材料。新会话开始时，她是活过那些对话的那个人，用「我记得」接着说。
 
-本文件是产品约定。这一版实现原文记忆，以及多维情绪和主动开口。日记、向量和重排仍是接口，默认不写日记、不返回向量。
+本文件是产品约定。这一版实现原文记忆、多维情绪和主动开口，以及她口吻的日、周、月日记。向量和重排仍是接口，默认不返回向量。
 
 ## 本切片交付
 
 - 原始对话写入 SQLite，不提炼成事实卡片。
-- 模式版本和显式迁移。空库升到版本 2；版本 1 在打开时迁到 2；更新、外来或不完整的库只读拒绝。
+- 模式版本和显式迁移。空库升到版本 3；版本 1 和 2 在打开时按步骤迁到 3；更新、外来或不完整的库只读拒绝。
 - FTS5 中文检索。查询词全部加引号，模型输入不能改写 `MATCH`。
-- 固定预算下的第一人称注入。人设是稳定的系统段，近期原话、检索片段和内心独白是 `agent/pre-step` 里的一条易变消息。
-- `history_search` 工具。
-- 身份表：平台账号映射到 `person_id`。搬人时，心情、历史、跟进和主动队列跟着回合一起搬。
+- 固定预算下的第一人称注入。人设是稳定的系统段，近期原话、检索片段（含日记）和内心独白是 `agent/pre-step` 里的一条易变消息。
+- `history_search` 工具。日记和原话共用这一份预算。
+- 身份表：平台账号映射到 `person_id`。搬人时，心情、历史、跟进、主动队列、日记页和重要事件跟着回合一起搬。
 - 多维情绪：PAD、可以并存的离散心情、更慢的亲密度。每回合打分，历史保留。
-- 主动开口：阈值、每日上限、最小间隔、安静时段，以及第二天跟进。队列在 SQLite；活着的 agent 用 `followup` 送出。
+- 主动开口：阈值、每日上限、最小间隔、安静时段，以及第二天跟进。队列在 SQLite；活着的 agent 用 `followup` 送出。停在 `delivering` 的行下次打开收成已送，不再发第二次。
+- 日记：用她的口吻写日、周、月。原文不删。重要事件逐字留下，不参与压缩。换日或空闲时封页，重复跑不另写一页。便宜模型可插，没有 key 就用确定性回退。
 - 上述行为的测试，以及一份跨会话回忆脚本。
 
-日记分层、向量检索与重排仍在 `src/companion/stubs.ts`。`StubEmotionModel` 仍是显式的空实现，给测试和关掉心情的部署用。插件在打开库之后用 `PersistedEmotionModel`，不再用这个空实现。
+向量检索与重排仍在 `src/companion/stubs.ts`。`StubEmotionModel` 和 `StubDiaryWriter` 仍是显式的空实现，给测试和关掉对应功能的部署用。插件在打开库之后用 `PersistedEmotionModel` 和 `LayeredDiaryWriter`。
 
 ## 不在任何代码路径里的事
 
-长期微调是以后的事。本切片没有训练，也没有把原文导出给训练。默认路径不调用模型，也不读取 API key。便宜模型打分是可选的：没有 `DSH_COMPANION_EMOTION_API_KEY` 就用规则，启动不会去等凭据。需要 DeepSeek API key 才能完成的实机对话，本切片不跑。
+长期微调是以后的事。本切片没有训练，也没有把原文导出给训练。默认路径不调用模型，也不读取 API key。便宜模型打分和写日记都是可选的：没有 `DSH_COMPANION_EMOTION_API_KEY` 就用规则，没有 `DSH_COMPANION_DIARY_API_KEY` 就用确定性日记。启动不会去等凭据。需要 DeepSeek API key 才能完成的实机对话，本切片不跑。
 
 ## 连续性
 
@@ -40,12 +41,16 @@ session/event
   turns 原文  +  turns_fts 分词        identities
         │
         ├─ emotion.observe     衰减、打分、写历史、必要时排队
-        ├─ diary.observe / vector.upsert   （日记和向量仍是空实现）
+        ├─ diary.observe       标出重要事件；换日则封上一页
+        ├─ vector.upsert       （向量仍是空实现）
+        ▼
+换日、agent/status 空闲，或定时器
+  封已经结束的日、周、月。已经封好的页不再写第二遍
         ▼
 agent/pre-step
   先等心情这一轮的写入结束
-  用当前这句话做 FTS5（以及可选的向量并集）
-  预算内拼最近原话 + 命中窗口 + 内心独白
+  用当前这句话做 FTS5（原话和已封日记，以及可选的向量并集）
+  预算内拼最近原话 + 命中窗口 + 日记页 + 内心独白
   插到本步消息的前面，系统人设不动
 ```
 
@@ -60,7 +65,7 @@ agent/pre-step
 
 助手消息本身不携带渠道字段。记录器把本会话上一条回合的 `channel`、`user_id`、`chat_id`、`bridge`、`person_id` 抄过去。
 
-## 数据模型（schema 2）
+## 数据模型（schema 3）
 
 产品标记 `meta.product = dsh-companion`。`meta.schema_version` 和 `meta.fts_token_version` 分开。分词格式变化只重建 `turns_fts`，不改原文。
 
@@ -75,6 +80,9 @@ agent/pre-step
 | `emotion_followup` | 从用户原话里记下的事，以及第二天的到期时间 |
 | `emotion_latch` | 某一维是否还可以再次因为越阈值而开口 |
 | `proactive_outbox` | 待送、在送、已送的主动消息 |
+| `diary_entry` | 已封或正在写的日、周、月。一个人、一层、一个周期一行 |
+| `diary_fts` | 已封日记的 FTS5。写入的是分词，不是原文 |
+| `diary_event` | 重要事件。`verbatim` 是那一条回合的全文 |
 
 `turns` 的列：`id`，`channel`，`user_id`，`chat_id`，`session_id`，`bridge`，`person_id`，`ts`，`role`（`user` 或 `assistant`），`content`，`turn_no`。
 
@@ -86,9 +94,13 @@ agent/pre-step
 
 `proactive_outbox` 的 `kind` 是 `threshold` 或 `followup`。`status` 是 `queued`、`delivering` 或 `delivered`。阈值行带维度名，跟进行带 `followup_id`。`text` 是给她的开口指令，不是用户原话。
 
-索引：`turns_person_recent (person_id, id DESC)`，`turns_session (session_id, id)`，`identities_person (person_id)`，`emotion_history_person`，`emotion_followup_due`，`emotion_followup_turn`，`proactive_outbox_due`。
+`diary_entry` 的列：`id`，`person_id`，`layer`（`day` / `week` / `month`），`period_key`，`text`，`source`（`pending` / `model` / `fallback`），`status`（`sealing` / `sealed`），`created_at`，`updated_at`。正在写的行 `text` 为空、`source` 为 `pending`。封好的行 `text` 非空，`source` 是 `model` 或 `fallback`。`(person_id, layer, period_key)` 唯一。
 
-原文行和它的 FTS 行在同一个 `BEGIN IMMEDIATE` 事务里写。心情的当前行、历史行和可选的跟进行也在同一个事务里写。`close()` 可以重复调用。打开库时，停在 `delivering` 的主动行改回 `queued`。
+`diary_event` 的列：`id`，`person_id`，`turn_id`，`ts`，`period_key`（本地日），`role`，`kind`，`verbatim`。`turn_id` 唯一。`verbatim` 是那一条回合的全文，不是摘录。
+
+索引：`turns_person_recent (person_id, id DESC)`，`turns_session (session_id, id)`，`identities_person (person_id)`，`emotion_history_person`，`emotion_followup_due`，`emotion_followup_turn`，`proactive_outbox_due`，`diary_entry_period`，`diary_event_person`，`diary_event_turn`。
+
+原文行和它的 FTS 行在同一个 `BEGIN IMMEDIATE` 事务里写。封好的日记页和它的 FTS 行也在同一个事务里写。心情的当前行、历史行和可选的跟进行也在同一个事务里写。`close()` 可以重复调用。打开库时，停在 `delivering` 的主动行收成 `delivered`，不改回 `queued`。
 
 ### 迁移
 
@@ -98,11 +110,12 @@ agent/pre-step
 | --- | --- | --- |
 | 1 | `core-turns-identity-fts` | 建原文、FTS 和身份表，并写下产品标记 |
 | 2 | `emotion-state-history` | 建心情、历史、跟进、闩锁和主动队列 |
+| 3 | `diary-layers` | 建日记页、重要事件和日记 FTS |
 
-空文件或没有对象的库从 0 迁到 2。已有库先用只读连接分类：
+空文件或没有对象的库从 0 迁到 3。已有库先用只读连接分类：
 
-- 版本等于 2 且形状相符：打开。
-- 版本更低且形状相符：按 `MIGRATIONS` 里 `version > from` 的步骤升级，再把 `schema_version` 写成新版本。版本 1 的原文保留。版本 1 上如果已经有心情表，拒绝，不猜测怎么迁。
+- 版本等于 3 且形状相符：打开。
+- 版本更低且形状相符：按 `MIGRATIONS` 里 `version > from` 的步骤升级，再把 `schema_version` 写成新版本。版本 1 和 2 的原文保留。版本不到 3 时如果已经有日记表，拒绝，不猜测怎么迁。版本 1 上如果已经有心情表，同样拒绝。
 - 版本更高、产品标记不对、多了不认识的对象、列或 FTS 定义不符、数值越界、状态不是上面列出的那几个：拒绝。拒绝发生在只读分类阶段，不打开读写连接，因此不改主库，也不改写已经存在的 WAL。SQLite 在只读打开一个 WAL 模式的库时，可能在旁边放一个 0 字节的 `-wal` 和一个 `-shm`；里面没有提交过的页。
 
 后续切片要加表时，在同一次改动里做完这几件事：把 SQL 放进新的 `MIGRATIONS` 步骤，升高 `SCHEMA_VERSION`，把新对象（含 FTS 影子表）放进允许名单，并让形状检查认识新列。漏掉允许名单会导致下一次打开被当成外来库拒绝。不要跳号，不要在普通 `open` 之外做另一套隐式升级。
@@ -111,13 +124,13 @@ agent/pre-step
 
 中文分词沿用上游：拉丁词整词，CJK 单字加二字词。`compileMatch` 给每个词加引号再用 `OR` 连接。`MATCH` 的参数是绑定参数。
 
-`retrieve` 把 FTS 命中和可选 `VectorIndex.search` 的命中并成一个池，交给 `Reranker`。默认 `NullVectorIndex` 返回空，`FtsOrderReranker` 按 FTS rank 升序（越小越相关），没有 FTS rank 的命中排在所有全文命中之后。然后按 `contextRadius` 把同一个人、相邻 id 的原话扩成窗口，写成「你说 / 我说」。
+`retrieve` 把原话 FTS、已封日记 FTS，以及可选 `VectorIndex.search` 的命中并成一个池。原话和向量交给 `Reranker`。默认 `NullVectorIndex` 返回空，`FtsOrderReranker` 按 FTS rank 升序（越小越相关），没有 FTS rank 的命中排在所有全文命中之后。日记按自己的 FTS rank 插进同一个序列，和原话共用 `limit`。然后按 `contextRadius` 把同一个人、相邻 id 的原话扩成窗口，写成「你说 / 我说」。日记页写成「我翻到自己写过的一篇日记 / 一周 / 一个月」，正文就是她写的那一页；这一页里还没有的重要原话会再附上全文。
 
 替换向量或重排时，实现 `src/companion/stubs.ts` 里的接口并传给 `apply` 的 `extensions`，或让 `defaultExtensions()` 返回新实现。查询路径不用改。
 
 ## 预算和注入
 
-`renderCompanionPrompt` 把人设和易变回忆分开。人设放得进预算时，历史不会改变系统段。预算不够时先丢掉检索片段，再丢掉最旧的近期回合。人设本身超过预算才截断人设。
+`renderCompanionPrompt` 把人设和易变回忆分开。人设放得进预算时，历史不会改变系统段。预算不够时先丢掉检索片段（原话窗口和日记页都在这一截），再丢掉最旧的近期回合。人设本身超过预算才截断人设。日记不进稳定人设。
 
 可选的 `promptMaxTokens` 必须和 `promptTokenizerPath` 一起配置，沿用上游的 token 计数器。不配置就不做 token 预算，只按字符。
 
@@ -125,7 +138,7 @@ agent/pre-step
 
 ## history_search
 
-模型在需要比眼前更早的原话时调用。参数 `query`、`limit`（默认 `snippetLimit`，不超过 `searchLimitMax`）、`around`（0 到 8，默认 `contextRadius`）。结果是第一人称片段。没有命中时工具文本是「我翻了一下，细节没抓住。」范围是当前会话已经归属的那个人；还没有回合时用 `defaultPersonId`。
+模型在需要比眼前更早的原话或日记时调用。参数 `query`、`limit`（默认 `snippetLimit`，不超过 `searchLimitMax`）、`around`（0 到 8，默认 `contextRadius`）。结果是第一人称片段，日记页和原话窗口混在同一次上限里。没有命中时工具文本是「我翻了一下，细节没抓住。」范围是当前会话已经归属的那个人；还没有回合时用 `defaultPersonId`。
 
 ## 多渠道
 
@@ -171,15 +184,31 @@ agent/pre-step
 
 DeepSeek Harness 的 `Agent.followup` 会排一条用户角色消息并唤醒驱动，不改当前这轮。插件在 `agent/created` 和 `agent/status` 空闲时记下活着的 agent，按会话和人去找。`deliverViaFollowup` 给正文加上 U+2060，并设置 `source.kind = "dsh-companion"`、`source.form = "proactive"`，记录器因此跳过它。正文是让她开口的指令，不是假造的用户台词。没有活着的 agent 时，行留在 `queued`。
 
-没有这条投递路径时，队列本身就是接口。宿主稍后调用 `drainProactiveQueue(store, now, deliver)`：先把行从 `queued` 改成 `delivering`，`deliver` 返回真才标成 `delivered`，返回假或抛错就改回 `queued`。本插件不注册 `agent/turn-stopping`。
+没有这条投递路径时，队列本身就是接口。宿主稍后调用 `drainProactiveQueue(store, now, deliver)`：先把行从 `queued` 改成 `delivering`，`deliver` 返回真才标成 `delivered`，返回假或抛错表示这一次没有交出去，行改回 `queued`。进程若停在 `delivering`，下次打开把这些行收成 `delivered`（闩锁解除，跟进标成已送），不再调用 `deliver`。这是至多一次：崩溃如果发生在 `followup` 之前，这一条就不会再试。本插件不注册 `agent/turn-stopping`。
 
 依据：Mehrabian 的 PAD、The Sims 的需求衰减、Park 等人的 Generative Agents（反思与计划，而不是把情绪压成一个分数）。
 
-## TODO(diary)：日记分层
+## 日记
 
-接口：`DiaryWriter.observe(turn)`。当前是空操作。
+实现在 `src/companion/diary/`。`diaryEnabled: false` 时用 `StubDiaryWriter`，不标事件，也不封页。打开时，插件用 `LayeredDiaryWriter`。
 
-后续切片：用她的口吻写日、周、月三层。原始回合永久保留。重要事件逐字保存，不参与压缩。日记是附加层，不替换 `turns.content`。
+三层都是附加页，不替换 `turns.content`，也不删除回合。
+
+- 日：一个本地日一页。日界用 `diaryTimeZone`（默认 `Asia/Shanghai`）。正在过的这一天不封。
+- 周：ISO 周。这一周里有回合的每一天都已经封好，并且这一周已经过去，才写周页。周页把每天的叙述收短。
+- 月：本地月。这个月里出现过的每一周都已经封好，并且这个月已经过去，才写月页。跨月的那一周要等整周结束。
+
+封页的时机：下一条回合发现有尚未封上的过去日期（换日，包括进程重启后的第一句），`agent/status` 变为空闲，以及 `diaryIntervalMs` 定时器（默认 15 分钟，`0` 表示没有定时器）。同一个人、同一层、同一个 `period_key` 只有一行。已经是 `sealed` 的页直接跳过。正在写的行若超过 60 秒还停在 `sealing`，下一次可以接手；写成之后不再生成第二页。一次最多新封 `31` 天，剩下的下次继续。
+
+### 口吻和便宜模型
+
+正文是她的第一人称。不能出现「根据记录」「检索结果」「交接」。`diaryModelEnabled` 且 `DSH_COMPANION_DIARY_API_KEY` 非空、并且配了 `http(s)` 的 `diaryModelBaseUrl` 时，才构造 `CheapDiaryModel`。key 只在调用时从环境变量读入，不进配置、不进日志、不进库。空 key 不发请求。超时、非 2xx、坏 JSON、空文本，或正文里出现上面那三个词，都改用 `fallbackNarrative`。模型不在 `pre-step` 的热路径上。默认超时 4 秒。
+
+### 重要事件
+
+`detectImportantEvent` 用固定词表，没有随机，没有网络。命中考试、面试、身体、出行、生日、约定、承诺、第一次、秘密、失去，或「我养了 / 我叫 / 它叫」这类点名，就把**整句原文**写入 `diary_event`。同一个 `turn_id` 再标一次不会多一行。周页和月页可以把普通日子收短，但事件的 `verbatim` 会附在页尾，注入时如果正文里还没有这句，再附一次全文。检索到这一页时也是这样。
+
+晚到的回合如果落在已经封好的那一天，页不再改写。原文仍在 `turns`，事件行仍在。注入会把正文里缺的原话补上。
 
 ## TODO(vector) / TODO(rerank)：向量和重排
 
@@ -189,7 +218,7 @@ DeepSeek Harness 的 `Agent.followup` 会排一条用户角色消息并唤醒驱
 
 ## 成本
 
-召回和默认打分都是本地的。稳定人设单独成段，是为了让 DeepSeek 的前缀缓存能复用系统前缀；内心独白和近期原话不写进那段。同一档心情复用同一句独白，避免易变段因为微小浮点来回改写。便宜模型默认关闭。打开之后也只在有 key 时发一次短请求，失败就回到规则，不挡住这一轮的回忆。
+召回、默认打分和默写日记都是本地的。稳定人设单独成段，是为了让 DeepSeek 的前缀缓存能复用系统前缀；内心独白、近期原话和日记不写进那段。同一档心情复用同一句独白，避免易变段因为微小浮点来回改写。便宜模型默认关闭。情绪模型打开之后也只在有 key 时发一次短请求，失败就回到规则，不挡住这一轮的回忆。日记模型只在封页时调用，失败就用确定性正文，不挡住 `pre-step`。
 
 ## 诚实的限制
 
@@ -198,5 +227,6 @@ DeepSeek Harness 的 `Agent.followup` 会排一条用户角色消息并唤醒驱
 - 渠道身份取决于桥是否把字段放进钩子。没放到上面那些键里，消息就归 `defaultPersonId`，可能和真正的平台用户混在同一个人下面。
 - 没有做实机模型回合。插件加载、工具注册、人设段和钩子投递能在无 key 的情况下验证；模型是否按「我记得」说话，要有 key 或一个兼容端点之后才知道。
 - 便宜模型的请求形状用 mock 测过。没有可用的 key，也没有对真实端点发过请求，所以不知道线上会不会按约定的 JSON 返回。
-- 主动开口的队列、时区、上限和重试有测试。活着的 `agent.followup` 没有在运行中的 harness 里投递过，也没有送到 QQ 或微信。进程在 `delivering` 中停掉之后，下次打开会再送一次。
-- 规则词表是中文关键词，不是语义理解。没写到的说法不会推动心情，也不会被记成第二天要问的事。
+- 主动开口的队列、时区、上限和至多一次有测试。活着的 `agent.followup` 没有在运行中的 harness 里投递过，也没有送到 QQ 或微信。进程在 `delivering` 中停掉之后，下次打开把这一行收成已送，不再发。如果崩溃发生在真正调用 `followup` 之前，这一条就丢了，不会补送。
+- 规则词表是中文关键词，不是语义理解。没写到的说法不会推动心情，也不会被记成第二天要问的事，也不会被标成日记里的重要事件。
+- 日记的便宜模型用 mock 测过请求形状和失败回退。没有可用的 key，也没有对真实端点发过写日记的请求。已经封好的页不会因为后来又补进一句而改写；那一句仍在原文里。

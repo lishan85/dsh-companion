@@ -2,12 +2,10 @@
  * Extension points that this slice does not implement.
  *
  * Emotion is implemented by `PersistedEmotionModel` in `emotion/engine.ts`.
- * `StubEmotionModel` is the explicit inert double. `defaultExtensions()` still
- * returns it, because that helper has no database; the plugin constructs the
- * persisted model once the store is open.
- *
- * TODO(diary): daily, weekly, and monthly layers in her voice. Raw turns stay
- * forever. Important events are stored verbatim and are never compressed.
+ * The diary is implemented by `LayeredDiaryWriter` in `diary/writer.ts`.
+ * `StubEmotionModel` and `StubDiaryWriter` are the explicit inert doubles.
+ * `defaultExtensions()` still returns them, because that helper has no
+ * database; the plugin constructs the persisted models once the store is open.
  *
  * TODO(vector): configurable embedding provider (OpenAI-compatible HTTP) with
  * an offline fallback. TODO(rerank): blend FTS5/BM25 with character n-gram
@@ -37,12 +35,14 @@ export class StubEmotionModel implements EmotionModel {
 }
 
 export interface DiaryWriter {
-  observe(turn: TurnRecord): void;
+  observe(turn: TurnRecord): void | Promise<void>;
+  /** Resolves when a diary seal started asynchronously has finished. */
+  settle?(): Promise<void>;
 }
 
 export class StubDiaryWriter implements DiaryWriter {
   observe(_turn: TurnRecord): void {
-    // TODO(diary): roll the turn into the daily layer; seal weeks and months.
+    // Explicit off switch. The plugin default is LayeredDiaryWriter.
   }
 }
 

@@ -3,9 +3,11 @@
  *
  * Emotion baselines, decay, and inertia have code defaults. The knobs here
  * are the ones an operator changes: whether mood is on, the proactive cap
- * and quiet hours, and the optional cheap-model scorer. The model API key is
- * not a config field. It is read from `DSH_COMPANION_EMOTION_API_KEY` at
- * call time, and a missing key falls back to the rule scorer.
+ * and quiet hours, the optional cheap-model scorer, and the diary schedule.
+ * Model API keys are not config fields. Emotion reads
+ * `DSH_COMPANION_EMOTION_API_KEY` and the diary reads
+ * `DSH_COMPANION_DIARY_API_KEY` at call time. A missing key uses the
+ * deterministic fallback and does not wait on a credential.
  *
  * @module dsh-companion/config
  */
@@ -45,6 +47,13 @@ export interface CompanionConfig {
   emotionModelBaseUrl?: string;
   emotionModelName: string;
   emotionModelTimeoutMs: number;
+  diaryEnabled: boolean;
+  diaryTimeZone: string;
+  diaryIntervalMs: number;
+  diaryModelEnabled: boolean;
+  diaryModelBaseUrl?: string;
+  diaryModelName: string;
+  diaryModelTimeoutMs: number;
 }
 
 const ConfigSchema = z.object({
@@ -78,6 +87,13 @@ const ConfigSchema = z.object({
   emotionModelBaseUrl: z.string(),
   emotionModelName: z.string().default("deepseek-chat"),
   emotionModelTimeoutMs: z.number().default(800),
+  diaryEnabled: z.boolean().default(true),
+  diaryTimeZone: z.string().default("Asia/Shanghai"),
+  diaryIntervalMs: z.number().default(15 * 60 * 1000),
+  diaryModelEnabled: z.boolean().default(false),
+  diaryModelBaseUrl: z.string(),
+  diaryModelName: z.string().default("deepseek-chat"),
+  diaryModelTimeoutMs: z.number().default(4_000),
 });
 
 const POSITIVE = ["recentTurns", "promptMaxChars", "searchLimitMax"] as const;
@@ -112,10 +128,17 @@ export function loadCompanionConfig(value: unknown): CompanionConfig {
     emotionModelEnabled: parsed.emotionModelEnabled,
     emotionModelName: parsed.emotionModelName.trim(),
     emotionModelTimeoutMs: parsed.emotionModelTimeoutMs,
+    diaryEnabled: parsed.diaryEnabled,
+    diaryTimeZone: parsed.diaryTimeZone.trim(),
+    diaryIntervalMs: parsed.diaryIntervalMs,
+    diaryModelEnabled: parsed.diaryModelEnabled,
+    diaryModelName: parsed.diaryModelName.trim(),
+    diaryModelTimeoutMs: parsed.diaryModelTimeoutMs,
   };
   if (parsed.promptMaxTokens !== undefined) config.promptMaxTokens = parsed.promptMaxTokens;
   if (parsed.promptTokenizerPath !== undefined) config.promptTokenizerPath = parsed.promptTokenizerPath;
   if (parsed.emotionModelBaseUrl !== undefined) config.emotionModelBaseUrl = parsed.emotionModelBaseUrl.trim();
+  if (parsed.diaryModelBaseUrl !== undefined) config.diaryModelBaseUrl = parsed.diaryModelBaseUrl.trim();
   validateCompanionConfig(config);
   return config;
 }
@@ -172,6 +195,18 @@ export function validateCompanionConfig(config: CompanionConfig): void {
     const baseUrl = config.emotionModelBaseUrl;
     if (baseUrl === undefined || !/^https?:\/\//.test(baseUrl)) {
       throw new Error("dsh-companion: emotionModelEnabled requires an http(s) emotionModelBaseUrl");
+    }
+  }
+  if (typeof config.diaryEnabled !== "boolean") throw new Error("dsh-companion: diaryEnabled must be a boolean");
+  if (typeof config.diaryModelEnabled !== "boolean") throw new Error("dsh-companion: diaryModelEnabled must be a boolean");
+  assertTimeZone(config.diaryTimeZone);
+  assertInteger(config.diaryIntervalMs, "diaryIntervalMs", 0);
+  if (config.diaryModelName.length === 0) throw new Error("dsh-companion: diaryModelName must not be empty");
+  assertInteger(config.diaryModelTimeoutMs, "diaryModelTimeoutMs", 1);
+  if (config.diaryModelEnabled) {
+    const baseUrl = config.diaryModelBaseUrl;
+    if (baseUrl === undefined || !/^https?:\/\//.test(baseUrl)) {
+      throw new Error("dsh-companion: diaryModelEnabled requires an http(s) diaryModelBaseUrl");
     }
   }
 }

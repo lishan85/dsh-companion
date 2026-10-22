@@ -3,10 +3,10 @@
  *
  * The persona is a stable system section so a prefix cache can reuse it.
  * `agent/pre-step` prepends recent raw turns and retrieved windows.
- * `session/event` appends raw user and assistant utterances. Diary and vector
- * indexes stay on the stubs. Emotion is the persisted model: it scores each
- * turn, renders a short inner line into the volatile recall, and queues
- * proactive followups for a live `agent.followup` when one is known.
+ * `session/event` appends raw user and assistant utterances. Emotion scores
+ * each turn and queues proactive followups. The diary flags important events
+ * immediately and seals a day, week, or month on rollover, on idle, or on
+ * the backstop timer. Vector indexes stay on the stub.
  *
  * @module dsh-companion
  */
@@ -18,13 +18,15 @@ import type { TokenCounter } from "../contracts.js";
 import { loadTokenCounter } from "../token-counter.js";
 import { channelOf, parseSessionEvent, shouldSkipUserMessage, textOf } from "./channel.js";
 import { loadCompanionConfig, type CompanionConfig } from "./config.js";
+import { CheapDiaryModel } from "./diary/model.js";
+import { LayeredDiaryWriter } from "./diary/writer.js";
 import { deliverViaFollowup, type FollowupTarget } from "./emotion/deliver.js";
 import { defaultEmotionRuntime, PersistedEmotionModel } from "./emotion/engine.js";
 import { CheapModelScorer } from "./emotion/model-scorer.js";
 import { isRecallContent, renderCompanionPrompt } from "./render.js";
 import { retrieve } from "./retrieve.js";
 import { CompanionStore } from "./store.js";
-import { defaultExtensions, type CompanionExtensions, type EmotionModel } from "./stubs.js";
+import { defaultExtensions, type CompanionExtensions, type DiaryWriter, type EmotionModel } from "./stubs.js";
 import type { ProactiveRow } from "./emotion/types.js";
 import type { Snippet, TurnInput } from "./types.js";
 
@@ -33,7 +35,7 @@ export const inject = ["tools", "systemPrompt"];
 export { Config } from "./config.js";
 
 const SEARCH_DESCRIPTION =
-  "在你们的原始对话里按当下话题查找更早的原话。眼前这段已经在上下文里，所以只在需要更早的原话时再用。结果是她记得的原话和前后几句，不是一份交接材料。";
+  "在你们的原始对话和她写过的日记里按当下话题查找更早的内容。眼前这段已经在上下文里，所以只在需要更早的原话或日记时再用。结果是她记得的原话、前后几句，或她自己写过的一页，不是一份交接材料。";
 
 export interface CompanionApplyOptions {
   extensions?: CompanionExtensions;
@@ -66,6 +68,7 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
     : loadTokenCounter(config.promptTokenizerPath);
   let store: CompanionStore | undefined;
   let emotion: EmotionModel = extensions.emotion;
+  let diary: DiaryWriter = extensions.diary;
   const openTurns = new Map<string, number>();
   const agentsBySession = new Map<string, FollowupTarget>();
   const agentsByPerson = new Map<string, FollowupTarget>();
@@ -75,6 +78,7 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
     const opened = new CompanionStore(config.path);
     store = opened;
     let timer: ReturnType<typeof setInterval> | undefined;
+    let diaryTimer: ReturnType<typeof setInterval> | undefined;
     let owned: PersistedEmotionModel | undefined;
     if (!options.extensions && config.emotionEnabled) {
       const key = process.env.DSH_COMPANION_EMOTION_API_KEY?.trim() ?? "";
@@ -100,8 +104,34 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
         if (typeof timer.unref === "function") timer.unref();
       }
     }
+    if (!options.extensions && config.diaryEnabled) {
+      const key = process.env.DSH_COMPANION_DIARY_API_KEY?.trim() ?? "";
+      const model = config.diaryModelEnabled && key.length > 0 && config.diaryModelBaseUrl !== undefined
+        ? new CheapDiaryModel({
+            baseUrl: config.diaryModelBaseUrl,
+            model: config.diaryModelName,
+            timeoutMs: config.diaryModelTimeoutMs,
+            apiKey: key,
+          })
+        : undefined;
+      const writer = new LayeredDiaryWriter(opened, {
+        timeZone: config.diaryTimeZone,
+        ...(model ? { model } : {}),
+      });
+      diary = writer;
+      extensions = { ...extensions, diary: writer };
+      if (config.diaryIntervalMs > 0) {
+        diaryTimer = setInterval(() => {
+          void writer.maintain(Date.now()).catch(() => {
+            // The next settle() or maintain() surfaces a store failure.
+          });
+        }, config.diaryIntervalMs);
+        if (typeof diaryTimer.unref === "function") diaryTimer.unref();
+      }
+    }
     return () => {
       if (timer) clearInterval(timer);
+      if (diaryTimer) clearInterval(diaryTimer);
       store = undefined;
       opened.close();
     };
@@ -168,7 +198,12 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
         // The model keeps the failure and rethrows it from line() / settle().
       });
     }
-    extensions.diary.observe(turn);
+    const noted = diary.observe(turn);
+    if (noted instanceof Promise) {
+      void noted.catch(() => {
+        // A diary failure stays off the transcript path. settle() rethrows it.
+      });
+    }
     extensions.vector.upsert(turn.id, turn.content);
   });
 
@@ -256,6 +291,11 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
     if (status !== "idle") return;
     rememberAgent(payload, agentsBySession);
     if (emotion instanceof PersistedEmotionModel) void emotion.evaluateProactive(Date.now());
+    if (diary instanceof LayeredDiaryWriter) {
+      void diary.maintain(Date.now()).catch(() => {
+        // Idle sealing is idempotent. The next maintain() reports a store failure.
+      });
+    }
   });
 }
 

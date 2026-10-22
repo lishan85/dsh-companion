@@ -46,8 +46,10 @@ export function deliverViaFollowup(agent: FollowupTarget, text: string): void {
 
 /**
  * Claim each due row, hand it to `deliver`, and mark it delivered only after
- * a true result. A false result or a throw puts the row back to `queued`.
- * Returns how many rows were delivered.
+ * a true result. A false result or a throw means the sender reports that it
+ * did not hand the message off, and the row goes back to `queued`. A row
+ * left in `delivering` because the process died is finished on the next open
+ * and is not sent again.
  */
 export async function drainProactiveQueue(
   store: CompanionStore,

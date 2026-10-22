@@ -31,3 +31,8 @@ export type { EmotionScorer, EmotionScoreInput } from "./companion/emotion/model
 export { renderInnerMonologue } from "./companion/emotion/express.js";
 export { drainProactiveQueue, deliverViaFollowup } from "./companion/emotion/deliver.js";
 export type { ProactiveDeliverer, FollowupTarget } from "./companion/emotion/deliver.js";
+export { LayeredDiaryWriter } from "./companion/diary/writer.js";
+export type { DiaryRuntime } from "./companion/diary/writer.js";
+export { CheapDiaryModel, parseDiary } from "./companion/diary/model.js";
+export type { DiaryModel } from "./companion/diary/model.js";
+export { detectImportantEvent } from "./companion/diary/events.js";
