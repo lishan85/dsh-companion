@@ -90,6 +90,7 @@ describe("companion store", () => {
         "core-turns-identity-fts",
         "emotion-state-history",
         "diary-layers",
+        "hybrid-vectors",
       ]);
       const saved = store.appendTurn({
         channel: "qq",
@@ -205,7 +206,7 @@ describe("companion store", () => {
     newerDb.exec("PRAGMA journal_mode = DELETE");
     newerDb.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     newerDb.prepare("INSERT INTO meta (key, value) VALUES ('product', 'dsh-companion')").run();
-    newerDb.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '4')").run();
+    newerDb.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '5')").run();
     newerDb.close();
     const newerBytes = readFileSync(newer);
     expect(() => new CompanionStore(newer)).toThrow(new RegExp(`newer than supported ${SCHEMA_VERSION}`));

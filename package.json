@@ -1,14 +1,15 @@
 {
   "name": "dsh-companion",
   "version": "0.1.0",
-  "description": "Long-term companion for DeepSeek Harness: raw-turn SQLite log, CJK FTS5 recall, budgeted first-person injection, a persisted mood, and a layered diary",
+  "description": "Long-term companion for DeepSeek Harness: raw-turn SQLite log, CJK FTS5 plus hybrid vector recall, budgeted first-person injection, a persisted mood, and a layered diary",
   "keywords": [
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
     "companion",
     "sqlite",
-    "fts5"
+    "fts5",
+    "sqlite-vec"
   ],
   "type": "module",
   "packageManager": "pnpm@11.21.0",
@@ -59,6 +60,7 @@
     "vitest": "^3.2.4"
   },
   "optionalDependencies": {
-    "@huggingface/tokenizers": "0.2.0"
+    "@huggingface/tokenizers": "0.2.0",
+    "sqlite-vec": "0.1.9"
   }
 }

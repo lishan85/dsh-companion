@@ -6,12 +6,14 @@
  * `session/event` appends raw user and assistant utterances. Emotion scores
  * each turn and queues proactive followups. The diary flags important events
  * immediately and seals a day, week, or month on rollover, on idle, or on
- * the backstop timer. Vector indexes stay on the stub.
+ * the backstop timer. Hybrid retrieval embeds turns and sealed diary pages,
+ * and ingests dsh-wander trips as her own experiences.
  *
  * @module dsh-companion
  */
 
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
 import type { Context } from "@deepseek-ai/cordis";
 import { defineTool, type ToolRunContext } from "@deepseek-ai/dsh-tools";
 import type { TokenCounter } from "../contracts.js";
@@ -24,9 +26,12 @@ import { deliverViaFollowup, type FollowupTarget } from "./emotion/deliver.js";
 import { defaultEmotionRuntime, PersistedEmotionModel } from "./emotion/engine.js";
 import { CheapModelScorer } from "./emotion/model-scorer.js";
 import { isRecallContent, renderCompanionPrompt } from "./render.js";
-import { retrieve } from "./retrieve.js";
+import { retrieve, retrieveReady } from "./retrieve.js";
+import { HybridReranker, HttpReranker } from "./rerank.js";
 import { CompanionStore } from "./store.js";
-import { defaultExtensions, type CompanionExtensions, type DiaryWriter, type EmotionModel } from "./stubs.js";
+import { defaultExtensions, type CompanionExtensions, type DiaryWriter, type EmotionModel, type Reranker } from "./stubs.js";
+import { SqliteVectorIndex } from "./vector/index.js";
+import { ingestWanderExperience, ingestWanderFile, resolveWanderExperiencesPath } from "./wander.js";
 import type { ProactiveRow } from "./emotion/types.js";
 import type { Snippet, TurnInput } from "./types.js";
 
@@ -35,7 +40,7 @@ export const inject = ["tools", "systemPrompt"];
 export { Config } from "./config.js";
 
 const SEARCH_DESCRIPTION =
-  "在你们的原始对话和她写过的日记里按当下话题查找更早的内容。眼前这段已经在上下文里，所以只在需要更早的原话或日记时再用。结果是她记得的原话、前后几句，或她自己写过的一页，不是一份交接材料。";
+  "在你们的原始对话、她写过的日记，以及她自己出去看过的地方里按当下话题查找更早的内容。眼前这段已经在上下文里，所以只在需要更早的原话、日记或她的经历时再用。结果是她记得的原话、前后几句、她自己写过的一页，或她出去看过的一处，不是一份交接材料。";
 
 export interface CompanionApplyOptions {
   extensions?: CompanionExtensions;
@@ -73,6 +78,22 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
   const agentsBySession = new Map<string, FollowupTarget>();
   const agentsByPerson = new Map<string, FollowupTarget>();
   const host = ctx as unknown as Host;
+  let wanderMtime = -1;
+  const refreshWander = () => {
+    const opened = store;
+    if (!opened) return;
+    const experiencesPath = resolveWanderExperiencesPath(config);
+    if (experiencesPath.length === 0) return;
+    try {
+      const file = statSync(experiencesPath);
+      if (!file.isFile()) return;
+      if (file.mtimeMs === wanderMtime) return;
+      wanderMtime = file.mtimeMs;
+      ingestWanderFile(opened, experiencesPath, config.defaultPersonId);
+    } catch {
+      // A missing wander file is not a companion failure.
+    }
+  };
 
   host.effect(() => {
     const opened = new CompanionStore(config.path);
@@ -103,6 +124,24 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
         }, config.proactiveIntervalMs);
         if (typeof timer.unref === "function") timer.unref();
       }
+    }
+    if (!options.extensions) {
+      const index = new SqliteVectorIndex(opened, {
+        provider: config.embeddingProvider,
+        ...(config.embeddingBaseUrl !== undefined ? { baseUrl: config.embeddingBaseUrl } : {}),
+        model: config.embeddingModel,
+        dimensions: config.embeddingDimensions,
+        timeoutMs: config.embeddingTimeoutMs,
+        apiKeyEnv: config.embeddingApiKeyEnv,
+        minScore: config.vectorMinScore,
+        scanLimit: config.vectorScanLimit,
+      });
+      const reranker = buildReranker(config);
+      extensions = { ...extensions, vector: index, reranker };
+      refreshWander();
+      void index.backfill().catch(() => {
+        // FTS still answers while a backfill is retried on the next search.
+      });
     }
     if (!options.extensions && config.diaryEnabled) {
       const key = process.env.DSH_COMPANION_DIARY_API_KEY?.trim() ?? "";
@@ -205,6 +244,21 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
       });
     }
     extensions.vector.upsert(turn.id, turn.content);
+    const filled = extensions.vector.backfill?.();
+    if (filled) {
+      void Promise.resolve(filled).catch(() => {
+        // The next search retries rows that are still missing a vector.
+      });
+    }
+  });
+
+  host.on("wander/trip", (payload: unknown) => {
+    const opened = store;
+    if (!opened) return;
+    const outcome = ingestWanderExperience(opened, payload, config.defaultPersonId);
+    if (outcome === "skipped") return;
+    const filled = extensions.vector.backfill?.();
+    if (filled) void Promise.resolve(filled).catch(() => undefined);
   });
 
   host.on("agent/pre-step", async (payload: PreStepPayload, next: () => Promise<PreStepDecision>) => {
@@ -215,7 +269,8 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
     payload.signal?.throwIfAborted();
     rememberAgent(payload.agent, agentsBySession);
     await emotion.settle?.();
-    const wire = recallWire(opened, config, extensions, tokenCounter, payload.agent, decision.messages);
+    await diary.settle?.();
+    const wire = await recallWire(opened, config, extensions, tokenCounter, payload.agent, decision.messages, payload.signal, refreshWander);
     if (wire.length === 0) return decision;
     return {
       ...decision,
@@ -270,7 +325,18 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
       const sessionId = sessionIdOf(exec?.agent);
       const personId = (sessionId.length > 0 ? opened.latestTurnForSession(sessionId)?.personId : undefined)
         ?? config.defaultPersonId;
-      const snippets = searchHistory(opened, query, personId, limit, radius, extensions);
+      refreshWander();
+      await extensions.vector.backfill?.();
+      const signal = abortSignalOf(exec);
+      const snippets = await retrieveReady(opened, {
+        query,
+        personId,
+        limit,
+        radius,
+        vector: extensions.vector,
+        reranker: extensions.reranker,
+        ...(signal ? { signal } : {}),
+      });
       return { snippets: snippets.map(toView) };
     },
     isConcurrencySafe: () => true,
@@ -317,22 +383,33 @@ export function searchHistory(
   });
 }
 
-function recallWire(
+async function recallWire(
   store: CompanionStore,
   config: CompanionConfig,
   extensions: CompanionExtensions,
   tokenCounter: TokenCounter | undefined,
   agent: unknown,
   messages: readonly unknown[],
-): string {
+  signal: AbortSignal | undefined,
+  refreshWander: () => void,
+): Promise<string> {
   const current = latestUserMessage(messages);
   const sessionId = sessionIdOf(agent);
   const meta = channelOf(current);
   const personId = personIdFor(store, config, meta, sessionId);
   const query = textOf(current && typeof current === "object" ? (current as { content?: unknown }).content : undefined);
+  refreshWander();
   const snippets = query.length === 0
     ? []
-    : searchHistory(store, query, personId, config.snippetLimit, config.contextRadius, extensions);
+    : await retrieveReady(store, {
+        query,
+        personId,
+        limit: config.snippetLimit,
+        radius: config.contextRadius,
+        vector: extensions.vector,
+        reranker: extensions.reranker,
+        ...(signal ? { signal } : {}),
+      });
   const rendered = renderCompanionPrompt({
     persona: config.persona,
     emotionLine: extensions.emotion.line(personId, Date.now()),
@@ -460,6 +537,30 @@ function deliverToKnownAgent(
   } catch {
     return false;
   }
+}
+
+function buildReranker(config: CompanionConfig): Reranker {
+  const inner = new HybridReranker({
+    k: config.rrfK,
+    timeBoost: config.timeBoost,
+    timeHalfLifeDays: config.timeHalfLifeDays,
+    personBoost: config.personBoost,
+    topicBoost: config.topicBoost,
+  });
+  if (config.rerankProvider !== "http" || config.rerankBaseUrl === undefined) return inner;
+  return new HttpReranker({
+    baseUrl: config.rerankBaseUrl,
+    model: config.rerankModel.length > 0 ? config.rerankModel : "rerank",
+    apiKeyEnv: config.rerankApiKeyEnv,
+    timeoutMs: config.rerankTimeoutMs,
+    inner,
+  });
+}
+
+function abortSignalOf(exec: ToolRunContext | undefined): AbortSignal | undefined {
+  if (!exec || typeof exec !== "object") return undefined;
+  const signal = (exec as { signal?: unknown }).signal;
+  return signal instanceof AbortSignal ? signal : undefined;
 }
 
 function sessionIdOf(scope: unknown): string {
