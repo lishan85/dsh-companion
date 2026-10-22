@@ -412,7 +412,9 @@ describe("companion plugin", () => {
       });
       const qq = await host.tool.execute({ query: "青竹" }, { agent: { session: { id: "sq" } } });
       const local = await host.tool.execute({ query: "青竹" }, { agent: { session: { id: "sp" } } });
-      expect(qq.snippets).toHaveLength(1);
+      expect(qq.snippets.length).toBeGreaterThan(0);
+      expect(qq.snippets.every((item: { text: string }) => item.text.includes("青竹") && !item.text.includes("年糕"))).toBe(true);
+      expect(qq.snippets.some((item: { text: string }) => item.text.includes("你说"))).toBe(true);
       expect(local.snippets).toHaveLength(0);
       const cat = await host.tool.execute({ query: "年糕" }, { agent: { session: { id: "sp" } } });
       expect(cat.snippets[0].text).toContain("年糕");
