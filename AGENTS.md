@@ -1,6 +1,6 @@
 # dsh-companion — Project Instructions
 
-The package entry (`src/index.ts`) is the companion plugin. Product scope, the schema migration seam, and the emotion / diary / vector stubs are in `docs/PRD.md` and `src/companion/stubs.ts`. The inherited fact-memory engine and `dsh-ltm` CLI stay on their own database; do not fold raw companion turns into it.
+The package entry (`src/index.ts`) is the companion plugin. Product scope and the schema migration seam are in `docs/PRD.md`. Emotion and proactive delivery live in `src/companion/emotion/`. Diary and vector remain stubs in `src/companion/stubs.ts`. The inherited fact-memory engine and `dsh-ltm` CLI stay on their own database; do not fold raw companion turns into it.
 
 ## Inherited dsh-ltm notes
 

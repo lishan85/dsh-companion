@@ -10,6 +10,25 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { joinTokens, tokenize } from "../tokenize.js";
 import { CompanionError } from "./errors.js";
+import {
+  applyProactiveWrite,
+  claimOutbox,
+  commitEmotion as writeEmotionCommit,
+  finishOutbox,
+  latchesFor,
+  listDueOutbox,
+  listEmotionHistory,
+  listEmotionPeople,
+  listFollowups,
+  listOutbox,
+  readEmotion,
+  relinkEmotionRows,
+  requeueDelivering,
+  requeueOutbox,
+  type EmotionCommit,
+  type ProactiveWrite,
+} from "./emotion/persist.js";
+import type { EmotionHistoryRow, EmotionStateRow, FollowupRow, ProactiveRow } from "./emotion/types.js";
 import { FTS_TOKEN_VERSION, SCHEMA_VERSION, classifySchema, migrateSchema } from "./schema.js";
 import type { IdentityRecord, TurnInput, TurnRecord, TurnRole } from "./types.js";
 
@@ -73,6 +92,7 @@ export class CompanionStore {
         if (found.kind === "empty") migrateSchema(this.#db, 0);
         else if (found.kind === "legacy") migrateSchema(this.#db, found.from);
         this.#rebuildFtsIfNeeded();
+        requeueDelivering(this.#db);
       });
     } catch (error) {
       try {
@@ -205,6 +225,7 @@ export class CompanionStore {
       ).run(key, user, target, now);
       if (existing && existing.person_id !== target) {
         this.#db.prepare("UPDATE turns SET person_id = ? WHERE person_id = ?").run(target, existing.person_id);
+        relinkEmotionRows(this.#db, existing.person_id, target);
       }
     });
   }
@@ -219,6 +240,67 @@ export class CompanionStore {
       personId: String(row.person_id),
       createdAt: Number(row.created_at),
     }));
+  }
+
+  getEmotion(personId: string): EmotionStateRow | undefined {
+    this.#alive();
+    return readEmotion(this.#db, personId);
+  }
+
+  emotionPeople(): string[] {
+    this.#alive();
+    return listEmotionPeople(this.#db);
+  }
+
+  emotionHistory(personId: string, limit = 50): EmotionHistoryRow[] {
+    this.#alive();
+    const bounded = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 500) : 50;
+    return listEmotionHistory(this.#db, personId, bounded);
+  }
+
+  emotionFollowups(personId: string): FollowupRow[] {
+    this.#alive();
+    return listFollowups(this.#db, personId);
+  }
+
+  emotionLatches(personId: string): Map<string, boolean> {
+    this.#alive();
+    return latchesFor(this.#db, personId);
+  }
+
+  proactiveQueue(personId?: string): ProactiveRow[] {
+    this.#alive();
+    return listOutbox(this.#db, personId);
+  }
+
+  dueProactive(now: number): ProactiveRow[] {
+    this.#alive();
+    return listDueOutbox(this.#db, now);
+  }
+
+  commitEmotion(commit: EmotionCommit): void {
+    this.#alive();
+    this.#transaction(() => writeEmotionCommit(this.#db, commit));
+  }
+
+  applyProactivePlan(write: ProactiveWrite): void {
+    this.#alive();
+    this.#transaction(() => applyProactiveWrite(this.#db, write));
+  }
+
+  claimProactive(id: number, now: number): boolean {
+    this.#alive();
+    return this.#transaction(() => claimOutbox(this.#db, id, now));
+  }
+
+  requeueProactive(id: number): void {
+    this.#alive();
+    this.#transaction(() => requeueOutbox(this.#db, id));
+  }
+
+  finishProactive(id: number, now: number): void {
+    this.#alive();
+    this.#transaction(() => finishOutbox(this.#db, id, now));
   }
 
   latestTurnForSession(sessionId: string): TurnRecord | undefined {

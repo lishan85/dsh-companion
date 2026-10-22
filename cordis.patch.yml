@@ -17,3 +17,10 @@
         promptOrder: 12
         defaultPersonId: primary
         searchLimitMax: 20
+        emotionEnabled: true
+        proactiveEnabled: true
+        proactiveDailyCap: 2
+        proactiveQuietTimeZone: Asia/Shanghai
+        proactiveQuietStart: '23:00'
+        proactiveQuietEnd: '08:00'
+        proactiveFollowUpHour: 9
