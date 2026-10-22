@@ -1,12 +1,12 @@
 {
-  "name": "@tr1v3r/dsh-ltm",
-  "version": "0.3.3",
-  "description": "Structured long-term memory for DeepSeek Harness: CJK-aware tokenized search, hybrid rerank, dedupe, expiry review, and migration from dsh-memory — zero mandatory network",
+  "name": "dsh-companion",
+  "version": "0.1.0",
+  "description": "Long-term companion for DeepSeek Harness: raw-turn SQLite log, CJK FTS5 recall, and budgeted first-person injection",
   "keywords": [
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
-    "memory",
+    "companion",
     "sqlite",
     "fts5"
   ],
@@ -15,7 +15,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tr1v3r/dsh-ltm.git"
+    "url": "git+https://github.com/lishan85/dsh-companion.git"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

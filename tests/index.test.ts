@@ -1,7 +1,7 @@
 import type { Context } from "@deepseek-ai/cordis";
 import { validateJsonSchemaValue } from "@deepseek-ai/dsh-tools";
 import { describe, expect, it, vi } from "vitest";
-import { apply } from "../src/index.js";
+import { apply } from "../src/memory-plugin.js";
 
 // Capture actual registered definitions, not a parallel serializer/renderer.
 // The real registry and Cordis lifecycle are also exercised by boot-probe.

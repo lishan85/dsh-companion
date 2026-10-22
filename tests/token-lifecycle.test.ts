@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { apply } from "../src/index.js";
+import { apply } from "../src/memory-plugin.js";
 import { loadTokenCounter } from "../src/token-counter.js";
 
 /** Small surface harness; real Cordis registration remains covered by boot-probe. */
