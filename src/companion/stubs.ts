@@ -1,13 +1,10 @@
 /**
  * Extension points that this slice does not implement.
  *
- * TODO(emotion): PAD base (pleasure, arousal, dominance in [-1, 1]) plus a
- * discrete vector (happy, missing, aggrieved, worried, jealous, shy, angry,
- * at-ease in [0, 1]), each with baseline, decay, and inertia. A cheap model
- * proposes deltas; a deterministic scorer is the offline fallback. Expression
- * is the top two or three dimensions as inner monologue, never raw numbers.
- * Intimacy moves on a slower clock. Proactive messages fire on thresholds,
- * with a daily cap, a minimum gap, and quiet hours, plus next-day follow-ups.
+ * Emotion is implemented by `PersistedEmotionModel` in `emotion/engine.ts`.
+ * `StubEmotionModel` is the explicit inert double. `defaultExtensions()` still
+ * returns it, because that helper has no database; the plugin constructs the
+ * persisted model once the store is open.
  *
  * TODO(diary): daily, weekly, and monthly layers in her voice. Raw turns stay
  * forever. Important events are stored verbatim and are never compressed.
@@ -24,7 +21,9 @@ import type { TurnRecord } from "./types.js";
 export interface EmotionModel {
   /** Short inner-state line. Empty means "say nothing about mood". */
   line(personId: string, now: number): string;
-  observe(turn: TurnRecord): void;
+  observe(turn: TurnRecord): void | Promise<void>;
+  /** Resolves when a turn scored asynchronously has been applied. */
+  settle?(): Promise<void>;
 }
 
 export class StubEmotionModel implements EmotionModel {
@@ -33,7 +32,7 @@ export class StubEmotionModel implements EmotionModel {
   }
 
   observe(_turn: TurnRecord): void {
-    // TODO(emotion): score the turn and persist the new vector.
+    // Explicit off switch. The plugin default is PersistedEmotionModel.
   }
 }
 

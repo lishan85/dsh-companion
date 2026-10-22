@@ -1,7 +1,7 @@
 {
   "name": "dsh-companion",
   "version": "0.1.0",
-  "description": "Long-term companion for DeepSeek Harness: raw-turn SQLite log, CJK FTS5 recall, and budgeted first-person injection",
+  "description": "Long-term companion for DeepSeek Harness: raw-turn SQLite log, CJK FTS5 recall, budgeted first-person injection, and a persisted multi-dimensional mood",
   "keywords": [
     "dsh",
     "dsh-plugin",

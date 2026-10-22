@@ -86,7 +86,7 @@ describe("companion store", () => {
     const store = new CompanionStore(":memory:");
     try {
       expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
-      expect(MIGRATIONS.map((step) => step.name)).toEqual(["core-turns-identity-fts"]);
+      expect(MIGRATIONS.map((step) => step.name)).toEqual(["core-turns-identity-fts", "emotion-state-history"]);
       const saved = store.appendTurn({
         channel: "qq",
         userId: "u1",
@@ -175,7 +175,7 @@ describe("companion store", () => {
     const empty = fileDb();
     writeFileSync(empty, "");
     const created = new CompanionStore(empty);
-    expect(created.schemaVersion()).toBe(1);
+    expect(created.schemaVersion()).toBe(SCHEMA_VERSION);
     created.close();
     created.close();
 
@@ -201,10 +201,10 @@ describe("companion store", () => {
     newerDb.exec("PRAGMA journal_mode = DELETE");
     newerDb.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     newerDb.prepare("INSERT INTO meta (key, value) VALUES ('product', 'dsh-companion')").run();
-    newerDb.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '2')").run();
+    newerDb.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '3')").run();
     newerDb.close();
     const newerBytes = readFileSync(newer);
-    expect(() => new CompanionStore(newer)).toThrow(/newer than supported 1/);
+    expect(() => new CompanionStore(newer)).toThrow(new RegExp(`newer than supported ${SCHEMA_VERSION}`));
     expect(readFileSync(newer)).toEqual(newerBytes);
     expect(existsSync(`${newer}-wal`)).toBe(false);
 

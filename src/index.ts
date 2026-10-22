@@ -25,3 +25,9 @@ export type {
   Reranker,
   VectorIndex,
 } from "./companion/stubs.js";
+export { PersistedEmotionModel, defaultEmotionRuntime } from "./companion/emotion/engine.js";
+export { CheapModelScorer } from "./companion/emotion/model-scorer.js";
+export type { EmotionScorer, EmotionScoreInput } from "./companion/emotion/model-scorer.js";
+export { renderInnerMonologue } from "./companion/emotion/express.js";
+export { drainProactiveQueue, deliverViaFollowup } from "./companion/emotion/deliver.js";
+export type { ProactiveDeliverer, FollowupTarget } from "./companion/emotion/deliver.js";

@@ -3,9 +3,10 @@
  *
  * The persona is a stable system section so a prefix cache can reuse it.
  * `agent/pre-step` prepends recent raw turns and retrieved windows.
- * `session/event` appends raw user and assistant utterances. Emotion, diary,
- * and vector indexes are called through the stubs in `stubs.ts` and do no
- * work until a later slice replaces them.
+ * `session/event` appends raw user and assistant utterances. Diary and vector
+ * indexes stay on the stubs. Emotion is the persisted model: it scores each
+ * turn, renders a short inner line into the volatile recall, and queues
+ * proactive followups for a live `agent.followup` when one is known.
  *
  * @module dsh-companion
  */
@@ -17,10 +18,14 @@ import type { TokenCounter } from "../contracts.js";
 import { loadTokenCounter } from "../token-counter.js";
 import { channelOf, parseSessionEvent, shouldSkipUserMessage, textOf } from "./channel.js";
 import { loadCompanionConfig, type CompanionConfig } from "./config.js";
+import { deliverViaFollowup, type FollowupTarget } from "./emotion/deliver.js";
+import { defaultEmotionRuntime, PersistedEmotionModel } from "./emotion/engine.js";
+import { CheapModelScorer } from "./emotion/model-scorer.js";
 import { isRecallContent, renderCompanionPrompt } from "./render.js";
 import { retrieve } from "./retrieve.js";
 import { CompanionStore } from "./store.js";
-import { defaultExtensions, type CompanionExtensions } from "./stubs.js";
+import { defaultExtensions, type CompanionExtensions, type EmotionModel } from "./stubs.js";
+import type { ProactiveRow } from "./emotion/types.js";
 import type { Snippet, TurnInput } from "./types.js";
 
 export const name = "companion";
@@ -55,19 +60,50 @@ interface PreStepDecision {
 
 export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyOptions = {}): void {
   const config = loadCompanionConfig(rawConfig);
-  const extensions = options.extensions ?? defaultExtensions();
+  let extensions = options.extensions ?? defaultExtensions();
   const tokenCounter = config.promptTokenizerPath === undefined
     ? undefined
     : loadTokenCounter(config.promptTokenizerPath);
   let store: CompanionStore | undefined;
+  let emotion: EmotionModel = extensions.emotion;
   const openTurns = new Map<string, number>();
+  const agentsBySession = new Map<string, FollowupTarget>();
+  const agentsByPerson = new Map<string, FollowupTarget>();
   const host = ctx as unknown as Host;
 
   host.effect(() => {
-    store = new CompanionStore(config.path);
+    const opened = new CompanionStore(config.path);
+    store = opened;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let owned: PersistedEmotionModel | undefined;
+    if (!options.extensions && config.emotionEnabled) {
+      const key = process.env.DSH_COMPANION_EMOTION_API_KEY?.trim() ?? "";
+      const scorer = config.emotionModelEnabled && key.length > 0 && config.emotionModelBaseUrl !== undefined
+        ? new CheapModelScorer({
+            baseUrl: config.emotionModelBaseUrl,
+            model: config.emotionModelName,
+            timeoutMs: config.emotionModelTimeoutMs,
+            apiKey: key,
+          })
+        : undefined;
+      owned = new PersistedEmotionModel(opened, {
+        runtime: runtimeOf(config),
+        ...(scorer ? { scorer } : {}),
+        deliver: (item) => deliverToKnownAgent(item, agentsBySession, agentsByPerson),
+      });
+      emotion = owned;
+      extensions = { ...extensions, emotion: owned };
+      if (config.proactiveEnabled && config.proactiveIntervalMs > 0) {
+        timer = setInterval(() => {
+          void owned?.evaluateProactive(Date.now());
+        }, config.proactiveIntervalMs);
+        if (typeof timer.unref === "function") timer.unref();
+      }
+    }
     return () => {
-      store?.close();
+      if (timer) clearInterval(timer);
       store = undefined;
+      opened.close();
     };
   });
 
@@ -124,7 +160,14 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
     };
     if (turnNo !== null) input.turnNo = turnNo;
     const turn = opened.appendTurn(input);
-    extensions.emotion.observe(turn);
+    const agent = agentsBySession.get(turn.sessionId);
+    if (agent) agentsByPerson.set(turn.personId, agent);
+    const observed = emotion.observe(turn);
+    if (observed instanceof Promise) {
+      void observed.catch(() => {
+        // The model keeps the failure and rethrows it from line() / settle().
+      });
+    }
     extensions.diary.observe(turn);
     extensions.vector.upsert(turn.id, turn.content);
   });
@@ -135,6 +178,8 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
     const opened = store;
     if (!opened) return decision;
     payload.signal?.throwIfAborted();
+    rememberAgent(payload.agent, agentsBySession);
+    await emotion.settle?.();
     const wire = recallWire(opened, config, extensions, tokenCounter, payload.agent, decision.messages);
     if (wire.length === 0) return decision;
     return {
@@ -195,6 +240,23 @@ export function apply(ctx: Context, rawConfig: unknown, options: CompanionApplyO
     },
     isConcurrencySafe: () => true,
   }));
+
+  host.on("agent/created", (payload: unknown) => {
+    rememberAgent(payload, agentsBySession);
+    void emotion.settle?.().then(() => {
+      const owned = emotion;
+      if (owned instanceof PersistedEmotionModel) return owned.evaluateProactive(Date.now());
+      return undefined;
+    });
+  });
+
+  host.on("agent/status", (payload: unknown) => {
+    if (!payload || typeof payload !== "object") return;
+    const status = (payload as { status?: unknown }).status;
+    if (status !== "idle") return;
+    rememberAgent(payload, agentsBySession);
+    if (emotion instanceof PersistedEmotionModel) void emotion.evaluateProactive(Date.now());
+  });
 }
 
 export function searchHistory(
@@ -298,6 +360,66 @@ function turnStarted(event: unknown): number | undefined {
   const data = (event as { data?: unknown }).data;
   const turn = data && typeof data === "object" ? (data as { turn?: unknown }).turn : undefined;
   return typeof turn === "number" && Number.isInteger(turn) ? turn : undefined;
+}
+
+function runtimeOf(config: CompanionConfig) {
+  return defaultEmotionRuntime({
+    enabled: config.emotionEnabled,
+    proactive: {
+      enabled: config.proactiveEnabled,
+      dailyCap: config.proactiveDailyCap,
+      minGapMs: config.proactiveMinGapMs,
+      quiet: {
+        timeZone: config.proactiveQuietTimeZone,
+        start: config.proactiveQuietStart,
+        end: config.proactiveQuietEnd,
+      },
+      followUpHour: config.proactiveFollowUpHour,
+      followUpMinute: config.proactiveFollowUpMinute,
+      hysteresis: 0.12,
+      thresholds: {
+        missing: config.thresholdMissing,
+        worried: config.thresholdWorried,
+        aggrieved: config.thresholdAggrieved,
+        jealous: config.thresholdJealous,
+        angry: config.thresholdAngry,
+      },
+    },
+  });
+}
+
+function rememberAgent(value: unknown, agents: Map<string, FollowupTarget>): void {
+  const agent = followupTarget(value);
+  if (!agent) return;
+  const sessionId = sessionIdOf(agent);
+  if (sessionId.length === 0) return;
+  agents.set(sessionId, agent);
+}
+
+function followupTarget(value: unknown): FollowupTarget | undefined {
+  if (isFollowup(value)) return value;
+  if (!value || typeof value !== "object" || !("agent" in value)) return undefined;
+  const nested = (value as { agent: unknown }).agent;
+  return isFollowup(nested) ? nested : undefined;
+}
+
+function isFollowup(value: unknown): value is FollowupTarget {
+  return Boolean(value && typeof value === "object" && typeof (value as { followup?: unknown }).followup === "function");
+}
+
+function deliverToKnownAgent(
+  item: ProactiveRow,
+  bySession: Map<string, FollowupTarget>,
+  byPerson: Map<string, FollowupTarget>,
+): boolean {
+  const agent = byPerson.get(item.personId) ?? (item.sessionId.length > 0 ? bySession.get(item.sessionId) : undefined);
+  if (!agent) return false;
+  try {
+    deliverViaFollowup(agent, item.text);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function sessionIdOf(scope: unknown): string {
