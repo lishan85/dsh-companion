@@ -5,9 +5,14 @@
  * are the ones an operator changes: whether mood is on, the proactive cap
  * and quiet hours, the optional cheap-model scorer, and the diary schedule.
  * Model API keys are not config fields. Emotion reads
- * `DSH_COMPANION_EMOTION_API_KEY` and the diary reads
- * `DSH_COMPANION_DIARY_API_KEY` at call time. A missing key uses the
- * deterministic fallback and does not wait on a credential.
+ * `DSH_COMPANION_EMOTION_API_KEY`, the diary reads
+ * `DSH_COMPANION_DIARY_API_KEY`, embeddings read
+ * `DSH_COMPANION_EMBEDDING_KEY` (or `embeddingApiKeyEnv`), and the optional
+ * reranker reads `DSH_COMPANION_RERANK_KEY` (or `rerankApiKeyEnv`) at call
+ * time. A missing key uses the deterministic fallback and does not wait on
+ * a credential. Wander's `experiences.jsonl` is read from
+ * `wanderExperiencesPath`, or from `DSH_WANDER_EXPERIENCES`, or from
+ * `DSH_WANDER_DATA_DIR/experiences.jsonl`.
  *
  * @module dsh-companion/config
  */
@@ -54,6 +59,25 @@ export interface CompanionConfig {
   diaryModelBaseUrl?: string;
   diaryModelName: string;
   diaryModelTimeoutMs: number;
+  embeddingProvider: "offline" | "openai";
+  embeddingBaseUrl?: string;
+  embeddingModel: string;
+  embeddingDimensions: number;
+  embeddingTimeoutMs: number;
+  embeddingApiKeyEnv: string;
+  rerankProvider: "deterministic" | "http";
+  rerankBaseUrl?: string;
+  rerankModel: string;
+  rerankTimeoutMs: number;
+  rerankApiKeyEnv: string;
+  rrfK: number;
+  timeBoost: number;
+  timeHalfLifeDays: number;
+  personBoost: number;
+  topicBoost: number;
+  vectorMinScore: number;
+  vectorScanLimit: number;
+  wanderExperiencesPath: string;
 }
 
 const ConfigSchema = z.object({
@@ -94,6 +118,25 @@ const ConfigSchema = z.object({
   diaryModelBaseUrl: z.string(),
   diaryModelName: z.string().default("deepseek-chat"),
   diaryModelTimeoutMs: z.number().default(4_000),
+  embeddingProvider: z.string().default("offline"),
+  embeddingBaseUrl: z.string(),
+  embeddingModel: z.string().default(""),
+  embeddingDimensions: z.number().default(128),
+  embeddingTimeoutMs: z.number().default(4_000),
+  embeddingApiKeyEnv: z.string().default("DSH_COMPANION_EMBEDDING_KEY"),
+  rerankProvider: z.string().default("deterministic"),
+  rerankBaseUrl: z.string(),
+  rerankModel: z.string().default(""),
+  rerankTimeoutMs: z.number().default(2_000),
+  rerankApiKeyEnv: z.string().default("DSH_COMPANION_RERANK_KEY"),
+  rrfK: z.number().default(60),
+  timeBoost: z.number().default(0.15),
+  timeHalfLifeDays: z.number().default(30),
+  personBoost: z.number().default(0.1),
+  topicBoost: z.number().default(0.2),
+  vectorMinScore: z.number().default(0.2),
+  vectorScanLimit: z.number().default(4096),
+  wanderExperiencesPath: z.string().default(""),
 });
 
 const POSITIVE = ["recentTurns", "promptMaxChars", "searchLimitMax"] as const;
@@ -134,11 +177,36 @@ export function loadCompanionConfig(value: unknown): CompanionConfig {
     diaryModelEnabled: parsed.diaryModelEnabled,
     diaryModelName: parsed.diaryModelName.trim(),
     diaryModelTimeoutMs: parsed.diaryModelTimeoutMs,
+    embeddingProvider: parsed.embeddingProvider === "openai" ? "openai" : "offline",
+    embeddingModel: parsed.embeddingModel.trim(),
+    embeddingDimensions: parsed.embeddingDimensions,
+    embeddingTimeoutMs: parsed.embeddingTimeoutMs,
+    embeddingApiKeyEnv: parsed.embeddingApiKeyEnv.trim(),
+    rerankProvider: parsed.rerankProvider === "http" ? "http" : "deterministic",
+    rerankModel: parsed.rerankModel.trim(),
+    rerankTimeoutMs: parsed.rerankTimeoutMs,
+    rerankApiKeyEnv: parsed.rerankApiKeyEnv.trim(),
+    rrfK: parsed.rrfK,
+    timeBoost: parsed.timeBoost,
+    timeHalfLifeDays: parsed.timeHalfLifeDays,
+    personBoost: parsed.personBoost,
+    topicBoost: parsed.topicBoost,
+    vectorMinScore: parsed.vectorMinScore,
+    vectorScanLimit: parsed.vectorScanLimit,
+    wanderExperiencesPath: parsed.wanderExperiencesPath.trim(),
   };
   if (parsed.promptMaxTokens !== undefined) config.promptMaxTokens = parsed.promptMaxTokens;
   if (parsed.promptTokenizerPath !== undefined) config.promptTokenizerPath = parsed.promptTokenizerPath;
   if (parsed.emotionModelBaseUrl !== undefined) config.emotionModelBaseUrl = parsed.emotionModelBaseUrl.trim();
   if (parsed.diaryModelBaseUrl !== undefined) config.diaryModelBaseUrl = parsed.diaryModelBaseUrl.trim();
+  if (parsed.embeddingBaseUrl !== undefined) config.embeddingBaseUrl = parsed.embeddingBaseUrl.trim();
+  if (parsed.rerankBaseUrl !== undefined) config.rerankBaseUrl = parsed.rerankBaseUrl.trim();
+  if (parsed.embeddingProvider !== "offline" && parsed.embeddingProvider !== "openai") {
+    throw new Error("dsh-companion: embeddingProvider must be offline or openai");
+  }
+  if (parsed.rerankProvider !== "deterministic" && parsed.rerankProvider !== "http") {
+    throw new Error("dsh-companion: rerankProvider must be deterministic or http");
+  }
   validateCompanionConfig(config);
   return config;
 }
@@ -208,6 +276,46 @@ export function validateCompanionConfig(config: CompanionConfig): void {
     if (baseUrl === undefined || !/^https?:\/\//.test(baseUrl)) {
       throw new Error("dsh-companion: diaryModelEnabled requires an http(s) diaryModelBaseUrl");
     }
+  }
+  if (config.embeddingProvider === "openai") {
+    const baseUrl = config.embeddingBaseUrl;
+    if (baseUrl === undefined || !/^https?:\/\//.test(baseUrl)) {
+      throw new Error("dsh-companion: embeddingProvider openai requires an http(s) embeddingBaseUrl");
+    }
+  }
+  assertInteger(config.embeddingDimensions, "embeddingDimensions", 8, 4096);
+  assertInteger(config.embeddingTimeoutMs, "embeddingTimeoutMs", 100, 60_000);
+  assertEnvName(config.embeddingApiKeyEnv, "embeddingApiKeyEnv");
+  if (config.rerankProvider === "http") {
+    const baseUrl = config.rerankBaseUrl;
+    if (baseUrl === undefined || !/^https?:\/\//.test(baseUrl)) {
+      throw new Error("dsh-companion: rerankProvider http requires an http(s) rerankBaseUrl");
+    }
+  }
+  assertInteger(config.rerankTimeoutMs, "rerankTimeoutMs", 100, 60_000);
+  assertEnvName(config.rerankApiKeyEnv, "rerankApiKeyEnv");
+  assertInteger(config.rrfK, "rrfK", 1, 1_000);
+  assertUnit(config.timeBoost, "timeBoost", 5);
+  if (!Number.isFinite(config.timeHalfLifeDays) || config.timeHalfLifeDays <= 0 || config.timeHalfLifeDays > 3650) {
+    throw new Error("dsh-companion: timeHalfLifeDays must be in (0, 3650]");
+  }
+  assertUnit(config.personBoost, "personBoost", 5);
+  assertUnit(config.topicBoost, "topicBoost", 5);
+  if (!Number.isFinite(config.vectorMinScore) || config.vectorMinScore < 0 || config.vectorMinScore > 1) {
+    throw new Error("dsh-companion: vectorMinScore must be in [0, 1]");
+  }
+  assertInteger(config.vectorScanLimit, "vectorScanLimit", 1, 100_000);
+}
+
+function assertUnit(value: number, field: string, max: number): void {
+  if (!Number.isFinite(value) || value < 0 || value > max) {
+    throw new Error(`dsh-companion: ${field} must be in [0, ${max}]`);
+  }
+}
+
+function assertEnvName(value: string, field: string): void {
+  if (!/^[A-Z][A-Z0-9_]*$/.test(value)) {
+    throw new Error(`dsh-companion: ${field} must be an uppercase environment variable name`);
   }
 }
 

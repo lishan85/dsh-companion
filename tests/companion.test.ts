@@ -90,6 +90,7 @@ describe("companion store", () => {
         "core-turns-identity-fts",
         "emotion-state-history",
         "diary-layers",
+        "hybrid-vectors",
       ]);
       const saved = store.appendTurn({
         channel: "qq",
@@ -205,7 +206,7 @@ describe("companion store", () => {
     newerDb.exec("PRAGMA journal_mode = DELETE");
     newerDb.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     newerDb.prepare("INSERT INTO meta (key, value) VALUES ('product', 'dsh-companion')").run();
-    newerDb.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '4')").run();
+    newerDb.prepare("INSERT INTO meta (key, value) VALUES ('schema_version', '5')").run();
     newerDb.close();
     const newerBytes = readFileSync(newer);
     expect(() => new CompanionStore(newer)).toThrow(new RegExp(`newer than supported ${SCHEMA_VERSION}`));
@@ -411,7 +412,9 @@ describe("companion plugin", () => {
       });
       const qq = await host.tool.execute({ query: "青竹" }, { agent: { session: { id: "sq" } } });
       const local = await host.tool.execute({ query: "青竹" }, { agent: { session: { id: "sp" } } });
-      expect(qq.snippets).toHaveLength(1);
+      expect(qq.snippets.length).toBeGreaterThan(0);
+      expect(qq.snippets.every((item: { text: string }) => item.text.includes("青竹") && !item.text.includes("年糕"))).toBe(true);
+      expect(qq.snippets.some((item: { text: string }) => item.text.includes("你说"))).toBe(true);
       expect(local.snippets).toHaveLength(0);
       const cat = await host.tool.execute({ query: "年糕" }, { agent: { session: { id: "sp" } } });
       expect(cat.snippets[0].text).toContain("年糕");

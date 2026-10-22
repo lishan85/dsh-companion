@@ -1,12 +1,14 @@
 /**
- * Companion schema, version 3.
+ * Companion schema, version 4.
  *
  * Version 1 is the raw transcript, its FTS index, and the identity map.
  * Version 2 adds the emotion vector, its history, follow-ups, and the
  * proactive outbox. Version 3 adds diary pages and verbatim events.
- * Later slices append a step to {@link MIGRATIONS} (vectors). A newer,
- * foreign, or malformed file is refused on a read-only look and is not
- * opened for write.
+ * Version 4 adds embedding blobs, wander experiences, and their FTS index.
+ * The sqlite-vec virtual table is a derived index created when the extension
+ * loads. Its name starts with `embeddings_vec` and is not required to open.
+ * A newer, foreign, or malformed file is refused on a read-only look and is
+ * not opened for write.
  *
  * @module dsh-companion/schema
  */
@@ -15,7 +17,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { CompanionError } from "./errors.js";
 
 export const PRODUCT = "dsh-companion";
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 export const FTS_TOKEN_VERSION = 1;
 
 export interface MigrationStep {
@@ -103,6 +105,22 @@ const DIARY_EVENT_COLUMNS = [
 const DIARY_OBJECTS = [
   "diary_entry", "diary_entry_period", "diary_event", "diary_event_person", "diary_event_turn",
   "diary_fts", "diary_fts_data", "diary_fts_idx", "diary_fts_content", "diary_fts_docsize", "diary_fts_config",
+] as const;
+
+const EMBEDDING_COLUMNS = [
+  "id", "source", "source_id", "model", "dim", "text_hash", "embedded_at", "vector",
+] as const;
+
+const EXPERIENCE_COLUMNS = [
+  "id", "external_id", "person_id", "source", "kind", "ts", "content", "topics",
+  "place_id", "place_name", "attribution", "license", "description_mode", "emotion_hint",
+] as const;
+
+const VECTOR_OBJECTS = [
+  "embeddings", "embeddings_model",
+  "experiences", "experiences_ts",
+  "experiences_fts", "experiences_fts_data", "experiences_fts_idx", "experiences_fts_content",
+  "experiences_fts_docsize", "experiences_fts_config",
 ] as const;
 
 const V2_SQL = `
@@ -209,18 +227,56 @@ const V3_SQL = `
   );
 `;
 
+const V4_SQL = `
+  CREATE TABLE IF NOT EXISTS embeddings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    source_id INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    text_hash TEXT NOT NULL,
+    embedded_at INTEGER NOT NULL,
+    vector BLOB NOT NULL,
+    UNIQUE (source, source_id, model)
+  );
+  CREATE INDEX IF NOT EXISTS embeddings_model ON embeddings (model, source);
+  CREATE TABLE IF NOT EXISTS experiences (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_id TEXT NOT NULL UNIQUE,
+    person_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    topics TEXT NOT NULL DEFAULT '',
+    place_id TEXT NOT NULL DEFAULT '',
+    place_name TEXT NOT NULL DEFAULT '',
+    attribution TEXT NOT NULL DEFAULT '',
+    license TEXT NOT NULL DEFAULT '',
+    description_mode TEXT NOT NULL DEFAULT '',
+    emotion_hint TEXT NOT NULL DEFAULT ''
+  );
+  CREATE INDEX IF NOT EXISTS experiences_ts ON experiences (ts DESC);
+  CREATE VIRTUAL TABLE IF NOT EXISTS experiences_fts USING fts5(
+    content,
+    tokenize = 'unicode61'
+  );
+`;
+
 const ALLOWED = new Set<string>([
   "meta", "turns", "turns_fts", "identities",
   "turns_person_recent", "turns_session", "identities_person",
   "turns_fts_data", "turns_fts_idx", "turns_fts_content", "turns_fts_docsize", "turns_fts_config",
   ...EMOTION_OBJECTS,
   ...DIARY_OBJECTS,
+  ...VECTOR_OBJECTS,
 ]);
 
 export const MIGRATIONS: readonly MigrationStep[] = [
   { version: 1, name: "core-turns-identity-fts", up: applyCore },
   { version: 2, name: "emotion-state-history", up: applyEmotion },
   { version: 3, name: "diary-layers", up: applyDiary },
+  { version: 4, name: "hybrid-vectors", up: applyVectors },
 ];
 
 export type SchemaClassification =
@@ -256,7 +312,7 @@ export function classifySchema(db: DatabaseSync): SchemaClassification {
   if (version > SCHEMA_VERSION) {
     return { kind: "unsupported", reason: `dsh-companion: database schema ${versionRaw} is newer than supported ${SCHEMA_VERSION}` };
   }
-  const foreign = names.filter((name) => !ALLOWED.has(name));
+  const foreign = names.filter((name) => !isAllowedObject(name));
   if (foreign.length > 0) {
     return { kind: "unsupported", reason: `dsh-companion: unrecognized object ${foreign[0]}; refusing to modify an unknown schema` };
   }
@@ -298,6 +354,14 @@ function applyDiary(db: DatabaseSync): void {
   db.exec(V3_SQL);
 }
 
+function applyVectors(db: DatabaseSync): void {
+  db.exec(V4_SQL);
+}
+
+function isAllowedObject(name: string): boolean {
+  return ALLOWED.has(name) || name.startsWith("embeddings_vec");
+}
+
 function stamp(db: DatabaseSync, version: number): void {
   db.prepare(
     `INSERT INTO meta (key, value) VALUES ('schema_version', ?)
@@ -324,7 +388,7 @@ function coreProblem(db: DatabaseSync): string | undefined {
 }
 
 function schemaProblem(db: DatabaseSync, version: number): string | undefined {
-  return coreProblem(db) ?? emotionProblem(db, version) ?? diaryProblem(db, version);
+  return coreProblem(db) ?? emotionProblem(db, version) ?? diaryProblem(db, version) ?? vectorProblem(db, version);
 }
 
 function emotionProblem(db: DatabaseSync, version: number): string | undefined {
@@ -460,6 +524,70 @@ function diaryProblem(db: DatabaseSync, version: number): string | undefined {
     OR typeof(verbatim) != 'text' OR verbatim = ''`);
   if (eventBad > 0) {
     return `dsh-companion: ${eventBad} malformed diary_event row(s); refusing to read or modify an unknown state`;
+  }
+  return undefined;
+}
+
+function vectorProblem(db: DatabaseSync, version: number): string | undefined {
+  const names = objectNames(db);
+  const present = VECTOR_OBJECTS.filter((name) => names.includes(name));
+  const vecNames = names.filter((name) => name.startsWith("embeddings_vec"));
+  if (version < 4) {
+    if (present.length > 0 || vecNames.length > 0) {
+      return "dsh-companion: vector objects exist before schema 4; refusing to modify an unknown schema";
+    }
+    return undefined;
+  }
+  if (present.length !== VECTOR_OBJECTS.length) {
+    return "dsh-companion: vector tables are missing; refusing to modify an unknown schema";
+  }
+  if (!sameColumns(db, "embeddings", EMBEDDING_COLUMNS)) {
+    return "dsh-companion: embeddings does not match the expected columns";
+  }
+  if (!sameColumns(db, "experiences", EXPERIENCE_COLUMNS)) {
+    return "dsh-companion: experiences does not match the expected columns";
+  }
+  if (!ftsOk(db, "experiences_fts")) return "dsh-companion: experiences_fts is not the expected fts5 content index";
+  const embeddingBad = badCount(db, `SELECT COUNT(*) AS n FROM embeddings WHERE
+    source NOT IN ('turn', 'diary', 'experience')
+    OR typeof(source_id) != 'integer' OR source_id < 1
+    OR typeof(model) != 'text' OR model = '' OR length(model) > 128
+    OR typeof(dim) != 'integer' OR dim < 1 OR dim > 4096
+    OR typeof(text_hash) != 'text' OR length(text_hash) != 64 OR text_hash GLOB '*[^0-9a-f]*'
+    OR typeof(embedded_at) != 'integer' OR embedded_at < 0 OR embedded_at > 9007199254740991
+    OR typeof(vector) != 'blob' OR length(vector) != dim * 4`);
+  if (embeddingBad > 0) {
+    return `dsh-companion: ${embeddingBad} malformed embedding row(s); refusing to read or modify an unknown state`;
+  }
+  const experienceBad = badCount(db, `SELECT COUNT(*) AS n FROM experiences WHERE
+    typeof(external_id) != 'text' OR external_id = '' OR length(external_id) > 200
+    OR typeof(person_id) != 'text' OR person_id = ''
+    OR source != 'dsh-wander' OR kind != 'travel'
+    OR typeof(ts) != 'integer' OR ts < 0 OR ts > 9007199254740991
+    OR typeof(content) != 'text' OR content = ''
+    OR typeof(topics) != 'text'
+    OR typeof(place_id) != 'text' OR typeof(place_name) != 'text'
+    OR typeof(attribution) != 'text' OR typeof(license) != 'text'
+    OR description_mode NOT IN ('', 'metadata', 'vision')
+    OR typeof(emotion_hint) != 'text'`);
+  if (experienceBad > 0) {
+    return `dsh-companion: ${experienceBad} malformed experience row(s); refusing to read or modify an unknown state`;
+  }
+  return vecIndexProblem(db);
+}
+
+function vecIndexProblem(db: DatabaseSync): string | undefined {
+  const row = db.prepare("SELECT type, sql FROM sqlite_schema WHERE name = 'embeddings_vec'").get() as
+    | { type: string; sql: string | null }
+    | undefined;
+  if (!row) return undefined;
+  if (row.type !== "table" || !row.sql) return "dsh-companion: embeddings_vec is not the sqlite-vec index";
+  const sql = row.sql.toLowerCase().replaceAll(/\s+/g, " ");
+  if (!sql.includes("using vec0") || !sql.includes("embedding") || !/float\[\d+\]/.test(sql)) {
+    return "dsh-companion: embeddings_vec is not the expected sqlite-vec index";
+  }
+  if (!sql.includes("distance_metric=cosine") && !sql.includes("distance_metric = cosine")) {
+    return "dsh-companion: embeddings_vec is not the expected sqlite-vec index";
   }
   return undefined;
 }

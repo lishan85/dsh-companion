@@ -6,14 +6,16 @@
 
 - 原始发言进 SQLite，不提炼成事实卡片。
 - FTS5 中文检索（拉丁词加 CJK 单字和二字词）。
-- 固定预算内，用第一人称注入最近的原话、检索到的上下文，以及她写过的日记。
-- `history_search`。原话和已封日记一起查。
+- 固定预算内，用第一人称注入最近的原话、检索到的上下文、她写过的日记，以及她自己出去看过的地方。
+- `history_search`。原话、已封日记和她的经历一起查。全文和向量融合，仍卡在原来的预算里。
 - 平台账号到同一个人的身份表。
 - 多维情绪：PAD 加一组可以并存的离散心情，以及更慢的亲密度。注入的是一两句内心独白，不是数字。
 - 主动开口：阈值、每日上限、最小间隔、安静时段，以及第二天跟进记得的事。停在送出中的一行不会再发第二次。
 - 她口吻的日、周、月日记。原文不删，重要事件不压缩。
+- 混合检索。默认是本地哈希，不需要 key；也可以接到任何 OpenAI 兼容的 `/embeddings`。可选的 sqlite-vec 做近邻，加载失败就扫 BLOB。
+- 摄入 [lishan85/dsh-wander](https://github.com/lishan85/dsh-wander) 的出行，记成她自己的经历。
 
-向量检索和重排仍是接口，默认不建向量。约定写在 [docs/PRD.md](docs/PRD.md)。空实现在 `src/companion/stubs.ts`。
+约定写在 [docs/PRD.md](docs/PRD.md)。`src/companion/stubs.ts` 里的空实现仍留给测试和显式关掉某一层的部署。
 
 ## 和 dsh-ltm 的关系
 
@@ -31,7 +33,9 @@
 
 ## 安装
 
-需要 Node `^22.19.0 || >=24.0.0`。默认路径不需要 API key。心情和日记的便宜模型都是可选的，没有 key 就用规则或确定性正文，启动不会去等凭据。
+需要 Node `^22.19.0 || >=24.0.0`。默认路径不需要 API key。心情和日记的便宜模型、HTTP 嵌入和 HTTP 重排都是可选的，没有 key 就用规则、确定性正文、离线哈希或本地融合，启动不会去等凭据。
+
+`sqlite-vec@0.1.9` 是 optionalDependencies，带预编译扩展，没有安装脚本。装不上或加载失败时，向量仍写在 SQLite 的 BLOB 里，检索改为进程内余弦。`@huggingface/tokenizers@0.2.0` 只在配置了 `promptTokenizerPath` 时需要。
 
 包名是 `dsh-companion`。发布到 npm 之前，在 profile 目录里把本仓库当作本地依赖安装：
 
@@ -56,7 +60,7 @@ node probe/boot-probe.mjs
 
 ## 配置
 
-`path` 必填，没有代码内默认值。其余字段有默认值。未知字段被忽略。嵌入地址仍然不在这份配置里。便宜模型的地址只有在对应开关打开时才读取；key 不进配置文件。
+`path` 必填，没有代码内默认值。其余字段有默认值。未知字段被忽略。key 不进配置文件，只在调用时从环境变量读取。
 
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |
@@ -67,6 +71,7 @@ node probe/boot-probe.mjs
 | `snippetLimit` | 3 | 一次注入或默认搜索的片段数 |
 | `promptMaxChars` | 6000 | 人设加易变回忆的字符预算 |
 | `promptMaxTokens` | 不设 | 和 `promptTokenizerPath` 必须成对出现 |
+| `promptTokenizerPath` | 不设 | 可选的 token 计数器资产。和 `promptMaxTokens` 必须成对出现 |
 | `promptOrder` | 12 | 人设段在系统提示中的顺序 |
 | `defaultPersonId` | `primary` | 没有渠道身份时的那个人 |
 | `searchLimitMax` | 20 | `history_search` 的 `limit` 上限 |
@@ -77,19 +82,59 @@ node probe/boot-probe.mjs
 | `proactiveQuietTimeZone` | `Asia/Shanghai` | 安静时段和「第二天」用的 IANA 时区 |
 | `proactiveQuietStart` / `proactiveQuietEnd` | `23:00` / `08:00` | 这段时间只排队，不送出。起止相同表示没有安静时段 |
 | `proactiveFollowUpHour` | `9` | 记住的事，第二天这个钟点之后才跟 |
+| `proactiveFollowUpMinute` | `0` | 跟进钟点的分钟 |
 | `proactiveIntervalMs` | `900000`（15 分钟） | 后台再评估一次。`0` 表示没有定时器，仍会在每回合之后评估 |
-| `thresholdMissing` 等 | `0.72`–`0.75` | `missing` / `worried` / `aggrieved` / `jealous` / `angry` 超过该值才主动开口 |
-| `emotionModelEnabled` | `false` | 打开后才尝试便宜模型。必须同时给 `emotionModelBaseUrl` |
+| `thresholdMissing` | `0.72` | 想念超过该值才主动开口 |
+| `thresholdWorried` | `0.75` | 担心超过该值才主动开口 |
+| `thresholdAggrieved` | `0.7` | 委屈超过该值才主动开口 |
+| `thresholdJealous` | `0.68` | 嫉妒超过该值才主动开口 |
+| `thresholdAngry` | `0.7` | 生气超过该值才主动开口 |
+| `emotionModelEnabled` | `false` | 打开后才尝试便宜模型。必须同时给 `http(s)` 的 `emotionModelBaseUrl` |
+| `emotionModelBaseUrl` | 不设 | 便宜模型的 OpenAI 兼容地址。开关关掉时可以不填 |
 | `emotionModelName` | `deepseek-chat` | 便宜模型的模型名 |
 | `emotionModelTimeoutMs` | `800` | 超时或失败就改用规则打分，不卡住回合 |
 | `diaryEnabled` | `true` | 关掉之后不写日记、不标重要事件 |
 | `diaryTimeZone` | `Asia/Shanghai` | 日、周、月的本地日历 |
 | `diaryIntervalMs` | `900000`（15 分钟） | 没有新回合时也检查要不要封页。`0` 表示没有定时器，换日和空闲仍会封 |
-| `diaryModelEnabled` | `false` | 打开后才尝试用便宜模型写日记。必须同时给 `diaryModelBaseUrl` |
+| `diaryModelEnabled` | `false` | 打开后才尝试用便宜模型写日记。必须同时给 `http(s)` 的 `diaryModelBaseUrl` |
+| `diaryModelBaseUrl` | 不设 | 写日记的 OpenAI 兼容地址。开关关掉时可以不填 |
 | `diaryModelName` | `deepseek-chat` | 写日记用的模型名 |
 | `diaryModelTimeoutMs` | `4000` | 超时或失败就改用确定性正文。封页不在回合的热路径上 |
+| `embeddingProvider` | `offline` | `offline` 或 `openai`。`openai` 表示任何 OpenAI 兼容的 `/embeddings`，必须同时给 `http(s)` 的 `embeddingBaseUrl` |
+| `embeddingBaseUrl` | 不设 | 嵌入地址。没有以 `/embeddings` 结尾时会补上。离线模式可以不填 |
+| `embeddingModel` | 空 | 空字符串表示离线用 `offline-hash-v1`，HTTP 用 `text-embedding-3-small` |
+| `embeddingDimensions` | `128` | 8 到 4096。换维度会另存一组向量，不和旧空间混用 |
+| `embeddingTimeoutMs` | `4000` | HTTP 嵌入超时。失败的行留到下一次补嵌入 |
+| `embeddingApiKeyEnv` | `DSH_COMPANION_EMBEDDING_KEY` | 读 key 的环境变量名，必须是大写加下划线 |
+| `rerankProvider` | `deterministic` | `deterministic` 或 `http`。`http` 必须同时给 `http(s)` 的 `rerankBaseUrl` |
+| `rerankBaseUrl` | 不设 | 重排地址。没有以 `/rerank` 结尾时会补上 |
+| `rerankModel` | 空 | 空字符串表示请求里用 `rerank` |
+| `rerankTimeoutMs` | `2000` | HTTP 重排超时。失败就留下本地融合 |
+| `rerankApiKeyEnv` | `DSH_COMPANION_RERANK_KEY` | 读重排 key 的环境变量名 |
+| `rrfK` | `60` | 倒数排名融合的常数，1 到 1000 |
+| `timeBoost` | `0.15` | 越近的命中乘得越多。0 到 5 |
+| `timeHalfLifeDays` | `30` | 时间加权的半衰期，天数，(0, 3650] |
+| `personBoost` | `0.1` | 当前这个人的原话和日记加权。经历不降权。0 到 5 |
+| `topicBoost` | `0.2` | 经历的话题和查询有共同分词时加权。0 到 5 |
+| `vectorMinScore` | `0.2` | 余弦低于这个值的向量命中不进入候选。0 到 1 |
+| `vectorScanLimit` | `4096` | sqlite-vec 的 `k` 至少扫这么多行；小库则扫全部 |
+| `wanderExperiencesPath` | 空 | dsh-wander 的 `experiences.jsonl`。空着就看环境变量 |
 
-`promptTokenizerPath` 沿用 dsh-ltm 的可选分词器资产，需要安装 optional 依赖 `@huggingface/tokenizers@0.2.0`。日记的 key 是环境变量 `DSH_COMPANION_DIARY_API_KEY`，和心情的 key 分开。没有 key、超时或正文不合规格，就用确定性的第一人称正文。
+bundle 的 `cordis.patch.yml` 写了 `embeddingProvider: offline`，所以装上去的默认路径不发嵌入请求。
+
+## 环境变量
+
+| 变量 | 谁读 | 没有它的时候 |
+| --- | --- | --- |
+| `DSH_COMPANION_EMOTION_API_KEY` | 心情便宜模型 | 用规则打分，不发请求 |
+| `DSH_COMPANION_DIARY_API_KEY` | 日记便宜模型 | 用确定性正文，不发请求 |
+| `DSH_COMPANION_EMBEDDING_KEY` | HTTP 嵌入。名字可用 `embeddingApiKeyEnv` 换 | 用离线哈希，不发请求 |
+| `DSH_COMPANION_RERANK_KEY` | HTTP 重排。名字可用 `rerankApiKeyEnv` 换 | 留下 RRF 和时间 / 人 / 话题加权 |
+| `DSH_WANDER_EXPERIENCES` | 没配 `wanderExperiencesPath` 时，经历文件的路径 | 不读文件 |
+| `DSH_WANDER_DATA_DIR` | 上面两个都空时，读这个目录下的 `experiences.jsonl` | 不读文件 |
+| `DSH_NODE_MODULES` | 只给 `probe/boot-probe.mjs`，指向已安装的 dsh `node_modules` | 探针改去找全局的 `@deepseek-ai/dsh` |
+
+key 不进配置、不进日志、不进库。401 或 403 只保留状态码，然后这个进程剩下的时间改用离线哈希。
 
 ## 架构
 
@@ -97,7 +142,7 @@ node probe/boot-probe.mjs
 
 `session/event` 记录 `user/message` 和 `assistant/message`。`turn/end` 没有正文。助手消息沿用本会话上一条的渠道字段。
 
-模式版本 3。版本 1 和 2 的库在打开时按 `MIGRATIONS` 升到 3，原文保留。更新、外来或不完整的文件在只读阶段拒绝，不改主库。
+模式版本 4。版本 1、2、3 的库在打开时按 `MIGRATIONS` 升到 4，原文保留。更新、外来或不完整的文件在只读阶段拒绝，不改主库。版本不到 4 却已经有向量或经历表时同样拒绝。
 
 ## 情绪和主动开口
 
@@ -115,11 +160,21 @@ node probe/boot-probe.mjs
 
 `StubDiaryWriter` 还在，给测试和显式关掉日记的部署用。插件自己的默认实现会落库。
 
-## 向量
+## 混合检索
 
-`VectorIndex` 不建向量。默认重排保持 FTS5 的顺序，向量命中会排在全文命中之后。
+插件打开库之后用 `SqliteVectorIndex` 和 `HybridReranker`。`NullVectorIndex` 和 `FtsOrderReranker` 还在，给测试用；直接调用 `retrieve` 且不传入向量时，行为仍是「全文在前，只有向量的命中在后」。
+
+每条新原话会嵌入。已经写过的原话、封好的日记页和经历由 `backfill` 补上，启动、回合、搜索和 `pre-step` 都会补。同一种模型、同一维度、正文没变，就不再嵌一次。
+
+融合是 RRF：FTS5 bm25、向量余弦、字符 n-gram 余弦，再乘时间、当前的人、话题。可选的 HTTP 重排失败时留下这个分数。预算仍然在 `renderCompanionPrompt`：装不下时先丢掉检索片段，再丢掉最旧的近期原话。人设不动。
+
+离线哈希能找回词表里的同义说法，例如「英短」对「宠物小猫」，即使两边没有共同的 FTS 词。它找不回词表以外、又没有共同字符的释义。无关句子的余弦接近 0，默认 0.2 以下不进入候选。这不是神经网络的召回质量。
 
 `StubEmotionModel` 还在，给测试和显式关掉心情的部署用。插件自己的默认实现是会落库的那一个。
+
+## dsh-wander
+
+[lishan85/dsh-wander](https://github.com/lishan85/dsh-wander) 在一次出行之后追加 `experiences.jsonl`，并发出 `wander/trip`。本插件两个都收，按 `id` 去重，记成她自己的经历，不按对方的 `person_id` 过滤。`descriptionMode: metadata` 的片段会说明她没有把画面交给视觉模型。坏行跳过。路径见上面的配置和环境变量。没有 wander 时，这两处都空着，插件照常启动。
 
 ## 多渠道
 
@@ -136,12 +191,15 @@ QQ、微信和其他社区桥把消息送进 dsh 会话。本插件只在 dsh �
 - 主动开口依赖活着的 `agent.followup`。本环境没有跑通一次真实的 harness 投递，也没有把消息送到 QQ 或微信。队列和 `drainProactiveQueue` 是接入点。停在 `delivering` 的行不会再送一次。
 - 日记的重要事件是关键词，不是语义理解。已经封好的页不会因为事后又补进一句而改写；那一句仍在原文里，注入时会把缺的原话补上。
 - 渠道桥的钩子字段仍未对照过它们的实现。
+- 离线嵌入只覆盖内置同义词簇和字符 n-gram。簇外的释义会漏。HTTP 嵌入和 HTTP 重排只用 mock 测过，没有对真实端点发过请求。
+- sqlite-vec 在本机 Node 22、linux-x64 上加载过。其他平台和 Node 24 要等 CI。加载失败时走 BLOB，这条有测试。
+- wander 的摄入按公开的版本 1 对象测过，没有和正在跑的 wander 进程联调。
 
 ## 路线
 
 1. 情绪、衰减、亲密度，以及带上限和安静时段的主动开口。这一步已经接上。
 2. 她口吻的日、周、月日记。原文永久保留，重要事件不压缩。这一步已经接上。
-3. 可配置嵌入、离线回退，以及和 FTS5 混在一起的重排。
+3. 可配置嵌入、离线回退，以及和 FTS5 混在一起的重排。这一步已经接上。
 4. 更长期的微调。现在没有这条代码路径。
 
 ## 开发

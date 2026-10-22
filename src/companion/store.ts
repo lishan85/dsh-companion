@@ -47,6 +47,33 @@ import {
 import type { DiaryClaim, DiaryEntry, DiaryEvent, DiaryLayer } from "./diary/types.js";
 import { FTS_TOKEN_VERSION, SCHEMA_VERSION, classifySchema, migrateSchema } from "./schema.js";
 import type { IdentityRecord, TurnInput, TurnRecord, TurnRole } from "./types.js";
+import {
+  corpus as readCorpus,
+  embeddingCensus,
+  embeddingStates as readEmbeddingStates,
+  ensureVecTable,
+  experienceFts,
+  knnVectors,
+  listVectors,
+  readExperience,
+  readVecStamp,
+  rebuildExperienceFts,
+  rebuildVec,
+  saveEmbedding,
+  tryLoadSqliteVec,
+  vecStamp,
+  writeExperience,
+  writeVecStamp,
+} from "./vector/persist.js";
+import type {
+  CorpusRow,
+  EmbeddingState,
+  ExperienceInput,
+  ExperienceRecord,
+  ExperienceWrite,
+  StoredVector,
+  VectorNeighbor,
+} from "./vector/types.js";
 
 const MAX_FIELD = 200;
 const MAX_CONTENT = 200_000;
@@ -61,6 +88,7 @@ export class CompanionStore {
   readonly #now: () => number;
   readonly #maxContent: number;
   #closed = false;
+  #vecState: "unknown" | "sqlite-vec" | "blob" = "unknown";
 
   constructor(path: string, options: CompanionStoreOptions = {}) {
     if (path.length === 0) throw new CompanionError("config", "dsh-companion: `path` must not be empty");
@@ -98,7 +126,7 @@ export class CompanionStore {
 
     let db: DatabaseSync | undefined;
     try {
-      db = this.#db = new DatabaseSync(path, { timeout: 5000 });
+      db = this.#db = new DatabaseSync(path, { timeout: 5000, allowExtension: true });
       this.#db.exec("PRAGMA journal_mode = WAL");
       this.#db.exec("PRAGMA busy_timeout = 5000");
       this.#db.exec("PRAGMA foreign_keys = ON");
@@ -393,6 +421,100 @@ export class CompanionStore {
     }
   }
 
+  activateVectorIndex(dimensions: number): "sqlite-vec" | "blob" {
+    this.#alive();
+    if (this.#vecState === "unknown") {
+      this.#vecState = tryLoadSqliteVec(this.#db) ? "sqlite-vec" : "blob";
+    }
+    if (this.#vecState === "blob") return "blob";
+    try {
+      this.#transaction(() => ensureVecTable(this.#db, dimensions));
+    } catch {
+      this.#vecState = "blob";
+    }
+    return this.#vecState;
+  }
+
+  alignVectorIndex(model: string, dimensions: number): void {
+    this.#alive();
+    if (this.#vecState !== "sqlite-vec") return;
+    this.#transaction(() => {
+      const census = embeddingCensus(this.#db, model, dimensions);
+      const wanted = vecStamp(model, dimensions, census.count, census.totalTime);
+      if (readVecStamp(this.#db) === wanted) return;
+      rebuildVec(this.#db, model, dimensions);
+    });
+  }
+
+  refreshVectorStamp(model: string, dimensions: number): void {
+    this.#alive();
+    if (this.#vecState !== "sqlite-vec") return;
+    this.#transaction(() => {
+      const census = embeddingCensus(this.#db, model, dimensions);
+      writeVecStamp(this.#db, vecStamp(model, dimensions, census.count, census.totalTime));
+    });
+  }
+
+  vectorCensus(model: string, dimensions: number): { count: number; totalTime: number } {
+    this.#alive();
+    return embeddingCensus(this.#db, model, dimensions);
+  }
+
+  embeddingCorpus(): CorpusRow[] {
+    this.#alive();
+    return readCorpus(this.#db);
+  }
+
+  embeddingStates(model: string): EmbeddingState[] {
+    this.#alive();
+    return readEmbeddingStates(this.#db, model);
+  }
+
+  saveVector(input: {
+    source: CorpusRow["source"];
+    sourceId: number;
+    model: string;
+    dim: number;
+    textHash: string;
+    embeddedAt: number;
+    vector: Buffer;
+    mirror: boolean;
+  }): void {
+    this.#alive();
+    this.#transaction(() => {
+      saveEmbedding(this.#db, input, input.mirror && this.#vecState === "sqlite-vec");
+    });
+  }
+
+  vectorBlobs(model: string, dimensions: number): StoredVector[] {
+    this.#alive();
+    return listVectors(this.#db, model, dimensions);
+  }
+
+  vectorNeighbors(model: string, dimensions: number, vector: Buffer, k: number): VectorNeighbor[] {
+    this.#alive();
+    return knnVectors(this.#db, model, dimensions, vector, k);
+  }
+
+  saveExperience(input: ExperienceInput): ExperienceWrite {
+    this.#alive();
+    return this.#transaction(() => writeExperience(this.#db, input));
+  }
+
+  getExperience(id: number): ExperienceRecord | undefined {
+    this.#alive();
+    return readExperience(this.#db, id);
+  }
+
+  ftsExperiences(match: string, limit: number): Array<{ id: number; rank: number }> {
+    this.#alive();
+    try {
+      return experienceFts(this.#db, match, limit);
+    } catch (error) {
+      throw new CompanionError("search", "dsh-companion: experience full-text query failed", { cause: error });
+    }
+  }
+
   latestTurnForSession(sessionId: string): TurnRecord | undefined {
     this.#alive();
     const row = this.#db.prepare(
@@ -419,6 +541,7 @@ export class CompanionStore {
     ).all() as unknown as Array<{ id: number; text: string }>;
     const insertDiary = this.#db.prepare("INSERT INTO diary_fts (rowid, content) VALUES (?, ?)");
     for (const page of pages) insertDiary.run(page.id, joinTokens(tokenize(page.text)));
+    rebuildExperienceFts(this.#db);
     this.#db.prepare(
       `INSERT INTO meta (key, value) VALUES ('fts_token_version', ?)
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,

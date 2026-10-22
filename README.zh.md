@@ -1,6 +1,6 @@
 # dsh-companion
 
-说明的正文在 [README.md](README.md)，是简体中文。这里补情绪、主动开口和日记这几层，避免和正文各写一套。
+说明的正文在 [README.md](README.md)，是简体中文。这里补情绪、主动开口、日记、混合检索和 dsh-wander 这几层，避免和正文各写一套。
 
 ## 情绪
 
@@ -25,3 +25,19 @@
 她用第一人称写日、周、月。原始回合不删。重要事件整句留下，周和月可以把普通日子写短，但这些原话不压缩。换日或空闲时封页，同一页再跑一次不会多写一页。
 
 便宜模型看环境变量 `DSH_COMPANION_DIARY_API_KEY`。没有 key、超时或正文不合规格，就用确定性正文，也不去等凭据。日记和原话一起检索，放进同一条易变回忆，共用原来的预算。稳定人设不写日记。
+
+## 混合检索
+
+原文、已封日记和她的经历都进同一套检索。FTS5、向量余弦和字符 n-gram 用倒数排名融合，再按时间、当前的人和话题加权。可选的 HTTP 重排失败时留下这个分数。预算不变：装不下先丢掉片段，人设不动。
+
+默认嵌入是离线哈希 `offline-hash-v1`，不需要 key。它不是神经网络，只覆盖 `OFFLINE_SYNONYM_CLUSTERS` 里的同义词簇和字符 n-gram。例如「英短」能对上「宠物小猫」，簇外又没有共同字符的释义会漏。无关句子默认 0.2 以下不进入候选。
+
+要接 OpenAI 兼容的 `/embeddings`，把 `embeddingProvider` 设为 `openai`，并给 `embeddingBaseUrl`。key 放在 `DSH_COMPANION_EMBEDDING_KEY`（名字可用 `embeddingApiKeyEnv` 换）。没有 key 不发请求。401 或 403 之后这个进程改用离线哈希。向量存在 SQLite。装得上 `sqlite-vec` 就用它做近邻，否则扫 BLOB。
+
+重排要接 HTTP 时，`rerankProvider` 设为 `http`，并给 `rerankBaseUrl`。key 是 `DSH_COMPANION_RERANK_KEY`。
+
+## dsh-wander
+
+[lishan85/dsh-wander](https://github.com/lishan85/dsh-wander) 的 `experiences.jsonl` 和 `wander/trip` 事件记成她自己的经历。路径是 `wanderExperiencesPath`，或 `DSH_WANDER_EXPERIENCES`，或 `DSH_WANDER_DATA_DIR/experiences.jsonl`。按外部 id 去重。`metadata` 的片段会说明她没有把画面交给视觉模型。这些经历不按对方的 person id 过滤。没有 wander 时留空即可。
+
+每一项配置和环境变量的表在 [README.md](README.md)。

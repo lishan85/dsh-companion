@@ -26,3 +26,6 @@
         proactiveFollowUpHour: 9
         diaryEnabled: true
         diaryTimeZone: Asia/Shanghai
+        # 默认离线哈希。要接 OpenAI 兼容的 /embeddings，改成 openai 并填写
+        # embeddingBaseUrl。key 放在 DSH_COMPANION_EMBEDDING_KEY，不写在这里。
+        embeddingProvider: offline

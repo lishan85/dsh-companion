@@ -36,3 +36,8 @@ export type { DiaryRuntime } from "./companion/diary/writer.js";
 export { CheapDiaryModel, parseDiary } from "./companion/diary/model.js";
 export type { DiaryModel } from "./companion/diary/model.js";
 export { detectImportantEvent } from "./companion/diary/events.js";
+export { HybridReranker, HttpReranker } from "./companion/rerank.js";
+export { OFFLINE_EMBEDDING_MODEL, OFFLINE_SYNONYM_CLUSTERS, offlineProvider } from "./companion/embed.js";
+export { SqliteVectorIndex } from "./companion/vector/index.js";
+export type { VectorBackfillReport, VectorIndexOptions } from "./companion/vector/index.js";
+export { ingestWanderExperience, ingestWanderFile, resolveWanderExperiencesPath } from "./companion/wander.js";

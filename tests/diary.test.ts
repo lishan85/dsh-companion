@@ -377,6 +377,9 @@ describe("diary schema", () => {
     created.close();
     const editor = new DatabaseSync(path);
     editor.exec(`
+      DROP TABLE IF EXISTS experiences_fts;
+      DROP TABLE IF EXISTS experiences;
+      DROP TABLE IF EXISTS embeddings;
       DROP TABLE IF EXISTS diary_fts;
       DROP TABLE IF EXISTS diary_event;
       DROP TABLE IF EXISTS diary_entry;

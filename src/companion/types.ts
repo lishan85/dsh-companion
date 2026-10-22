@@ -48,6 +48,6 @@ export interface Snippet {
   score: number;
   text: string;
   turnIds: number[];
-  /** Diary pages share the snippet budget with raw-turn windows. */
-  kind?: "turn" | "diary";
+  /** Diary pages and her own experiences share the snippet budget with raw-turn windows. */
+  kind?: "turn" | "diary" | "experience";
 }
